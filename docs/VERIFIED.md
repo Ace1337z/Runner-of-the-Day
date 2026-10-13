@@ -45,17 +45,22 @@ Every probe below was run read-only; no existing system file was changed.
 
 ## D. Data/business rules the prompt marks VERIFY
 
+> **Live probe results are in section G below.** The D-series rows here record
+> the *rule* and the safe default; section G records what the real APIs actually
+> returned on the probe date. Where a probe contradicts the safe default, section
+> G wins and is referenced here.
+
 | # | Item | Status | Result / default to use | Evidence / note |
 |---|---|---|---|---|
-| D-1 | Finviz freezes `Price`/`Change` at the regular close after 16:00 and carries a separate After-Hours Close | UNVERIFIED (needs `FINVIZ_TOKEN`) | **Safe default: encode it as the prompt states.** The penny system already relies on it: `FINVIZ_COLUMNS` includes 71/72 (After-Hours Close/Change) and 81 (Prev Close) precisely because the plain price freezes. Re-confirm with a live POST probe in Phase 1 and record the raw CSV as a fixture. | `penny/config.py` `FINVIZ_COLUMNS` comment; `sources/finviz.py`. |
-| D-2 | VERIFY which volume basis each plan returns (IEX-only vs consolidated) | UNVERIFIED (needs keys) | **Safe default: treat single-venue feeds as `SINGLE_VENUE`.** Penny defaults `ALPACA_FEED=iex` — an IEX-only feed understates consolidated volume. Relative-volume features are computed only against same-basis history; if basis `UNKNOWN`, RVOL features are `MISSING` (DATA-04). | `penny/config.py` `ALPACA_FEED=iex`. |
-| D-3 | Minimum price increments for stocks below/above $1.00 (sub-penny rule) | UNVERIFIED | **Safe default (US market rules, re-confirm in Phase 1):** ≥ $1.00 quotes in $0.01 increments; < $1.00 quotes in $0.0001 increments. Used only to store spread in ticks (G-SPREAD) and to render decimals (§18.1). Confirm against the exchange rulebook / a live quote probe before relying on it for a gate. | build-prompt rule; to probe. |
-| D-4 | EDGAR filing acceptance hours | UNVERIFIED | **Safe default:** EDGAR accepts filings roughly 06:00–22:00 ET on business days (and the system should expect overnight batches). Confirm from the SEC's published hours in Phase 1 and record the source. Overnight ingestion must be robust to bursts either way. | to confirm from SEC docs. |
-| D-5 | Trade-halt feed availability (free/paid) | UNVERIFIED | **Safe default: no halt feed in Phase 1.** `G-HALT` and `HALTED_SUSPENDED` are implemented against whatever the primary feed exposes (a halt shows as stale/absent quotes). The `halt_feed.py` adapter is a stub that returns `UNKNOWN` until a free or already-paid feed is confirmed. Ask the user before adding one. | to probe; no free feed confirmed. |
-| D-6 | Volatility pauses in extended hours | UNVERIFIED | **Safe default: not modelled.** Treated as a normal quote gap; staleness rules (DATA-03) apply. Revisit if a feed exposes them. | to probe. |
-| D-7 | Finviz Elite provides the symbol grouping needed for sympathy (§6.5) | UNVERIFIED | **Safe default: sympathy is OFF** unless the feed provides a usable sector/industry grouping. Penny's `finviz.groups(group="sector")` exists, so a sector-level grouping is likely available; confirm with a live probe and enable only if the join is reliable. | `sources/finviz.py` `groups()`. |
-| D-8 | Source supports intraday data that includes extended hours (for the runner list high, §12.3) | UNVERIFIED | **Safe default: build the runner-list high from the extended-hours source (Finviz After-Hours Close/Change + intraday columns), not from daily bars.** Confirm in Phase 1 with a probe on a known pre-market spiker. | prompt §12.3; D-1. |
-| D-9 | Which credentials are actually available/paid | BLOCKED (need user) | **Safe default: none assumed.** Wrappers fail soft; Phase 1 recording needs at least the primary feed (Finviz Elite) live. The user must supply `FINVIZ_TOKEN` (and optionally TwelveData/Alpaca/Finnhub) before Phase 1 recording can capture a real day. | no secrets in repo. |
+| D-1 | Finviz freezes `Price`/`Change` at the regular close after 16:00 and carries a separate After-Hours Close | VERIFIED (shape) | Confirmed: the universe export carries the separate **After-Hours Close/Change** columns (71/72) and `Prev Close` (81), which only exist because the plain price freezes. See **G-3**. | live probe `finviz_universe.txt`. |
+| D-2 | Which volume basis each plan returns (IEX-only vs consolidated) | PARTIAL | Alpaca credentials were rejected (see **G-9**), so the Alpaca feed basis cannot be probed. **Safe default stands: treat any single-venue feed as `SINGLE_VENUE`; if basis `UNKNOWN`, RVOL features are `MISSING` (DATA-04).** TwelveData's `quote.volume` and Finnhub's quote volume are not basis-labelled — treat as `UNKNOWN` unless cross-checked. | probes; `alpaca_*` 401. |
+| D-3 | Minimum price increments for stocks below/above $1.00 (sub-penny rule) | UNVERIFIED | **Safe default (re-confirm in Phase 1 from the rulebook):** ≥ $1.00 quotes in $0.01 increments; < $1.00 in $0.0001 increments. Used only to render decimals and store spread in ticks. Confirm against an exchange rulebook before relying on it for a gate. | to confirm from rulebook. |
+| D-4 | EDGAR filing acceptance hours | UNVERIFIED | **Safe default:** EDGAR accepts filings roughly 06:00–22:00 ET on business days; expect overnight batches. Confirm from the SEC's published hours. Ingestion is robust to bursts either way. SEC endpoints are reachable (see **G-6**). | to confirm from SEC docs. |
+| D-5 | Trade-halt feed availability (free/paid) | UNVERIFIED | **Safe default: no halt feed in Phase 1.** `G-HALT`/`HALTED_SUSPENDED` are implemented against what the primary feed exposes (a halt shows as stale/absent quotes). `halt_feed.py` returns `UNKNOWN` until a free or already-paid feed is confirmed. Ask the user before adding one. | no free feed confirmed. |
+| D-6 | Volatility pauses in extended hours | UNVERIFIED | **Safe default: not modelled.** Treated as a normal quote gap; staleness rules (DATA-03) apply. | to probe. |
+| D-7 | Finviz Elite provides the symbol grouping needed for sympathy (§6.5) | PARTIAL | The universe export carries **Sector** and **Industry** columns (see **G-3**), so a sector/industry grouping join is available. Sympathy stays **OFF** by default until a Phase-1 probe shows the join is reliable; the data to enable it exists. | live probe `finviz_universe.txt`. |
+| D-8 | Source supports intraday data that includes extended hours (for the runner-list high, §12.3) | PARTIAL | **TwelveData prepost = 403** (Pro-plan only) and **Alpha Vantage intraday extended-hours = premium**. **Finviz carries the After-Hours Close/Change** and intraday performance columns, so the *primary* extended-hours builder is **Finviz**, not TwelveData/Alpha Vantage. Build the runner-list high from Finviz extended-hour fields. See **G-3, G-4, G-8**. | probes. |
+| D-9 | Which credentials are actually available/paid | ANSWERED | Finviz Elite, TwelveData, Finnhub, Alpha Vantage, SEC, FINRA, Yahoo all authenticate and return data. **Alpaca credentials are rejected (401).** See **G-9**. | probes. |
 
 ## E. Storage/ops facts to MEASURE in Phase 1 (not assume)
 
@@ -88,3 +93,42 @@ build:
 3. **D-3, D-4, D-5, D-6** — market-rule facts; safe defaults stated, confirm in
    Phase 1 from the rulebook/provider docs.
 4. **M-1, M-2** — measured in Phase 1, reported here.
+
+---
+
+## G. Live probe results (credentials supplied)
+
+Probe date: **2026-10-13/14** (system clock 2026-10-13 ~22:00 UTC = 18:00 ET,
+post-market). Raw responses saved under `src/rotd/sources/fixtures/`. Probe
+driver: `probes/probe_sources.py`. Secrets live in a gitignored `config.env`
+and are never logged or committed.
+
+| # | Source | Probe | Status | Finding |
+|---|---|---|---|---|
+| G-1 | Finviz | `auth` on `/export/screener` + `/export/news` | 200 | Token **valid**. Universe CSV = 1.22 MB, full column set. News CSV works. |
+| G-2 | Finviz | `/export/latest-filings` without a ticker | 400 | `"Unable to get CIK from ticker"` — the filings link needs a `t` param. Adapter must pass a ticker; do not call it bare. |
+| G-3 | Finviz | Universe columns | 200 | Header includes `Sector`, `Industry`, and (per the column list) After-Hours Close/Change + Prev Close. **D-1, D-7 confirmed.** Extended-hours high builder = Finviz. |
+| G-4 | TwelveData | `quote` AAPL | 200 | Works. Fields include `timestamp`, `last_quote_at`, `is_market_open`, `previous_close`, `percent_change`, `average_volume`. |
+| G-5 | TwelveData | `time_series 1min` AAPL | 200 | Works; `meta.exchange_timezone = America/New_York`; last bar 15:59 ET. Regular-session 1-min bars. |
+| G-6 | TwelveData | `time_series prepost=true` | **403** | `"Pre-market and post-market data are available on the Pro plan…"`. **TwelveData cannot supply extended-hours candles on this plan (D-8).** |
+| G-7 | Finnhub | `quote`, `company-news`, `stock/market-status` | 200 | All work. `market-status` returns `{"session":"post-market","isOpen":false,"timezone":"America/New_York"}` — a usable **session detector**. |
+| G-8 | Finnhub | `stock/candle` | **403** | Premium-only. Finnhub is **news/quote/session only**, not a candle fallback. |
+| G-9 | Alpaca | `quotes/latest`, `bars`, `news`, `/v2/account` (paper + live) | **401** | Credentials **rejected** on every host: `{"message":"unauthorized."}`. Verified not a whitespace/header issue (key 26 chars, secret 44 chars, sent verbatim). **Alpaca is BLOCKED — key pair invalid/revoked/not activated. Non-blocking: Alpaca is only a candle fallback.** Re-probe when regenerated. |
+| G-10 | Alpha Vantage | `GLOBAL_QUOTE` | 200 | Works (free tier). Fields: open/high/low/price/volume/previous close/latest trading day. |
+| G-11 | Alpha Vantage | `TIME_SERIES_INTRADAY extended_hours=true` | premium | Premium endpoint message. Not usable on the free key. |
+| G-12 | SEC EDGAR | Atom filings, `company_tickers.json`, daily index | 200 | All work with a `User-Agent` and `Accept-Encoding: identity`. Atom is ISO-8859-1 — the adapter must not assume UTF-8. |
+| G-13 | Yahoo | `chart` | 200 | Works; `meta.hasPrePostMarketData: true`, `exchangeTimezoneName: America/New_York`. Usable as last-resort bars/regime. |
+| G-14 | Yahoo | `v7/finance/quote` | **401** | Yahoo deprecated the v7 quote endpoint. Use `chart` only. |
+| G-15 | FINRA | RegSHO daily short-volume txt | 200 | `Date|Symbol|ShortVolume|ShortExemptVolume|TotalVolume|Market` — daily short-sale volume works. |
+| G-16 | FINRA | `consolidatedShortInterest` API | 200 | JSON short-interest works (`currentShortPositionQuantity`, `averageDailyVolumeQuantity`, `settlementDate`). |
+
+### Consequences for the build
+
+- **Primary feed:** Finviz (universe, movers, quote rows, news, filings, and the
+  only extended-hours price source on these plans).
+- **Freshness feed:** TwelveData (regular-session 1-min bars + quote).
+- **Candle fallback chain:** TwelveData → Yahoo → (Alpaca when unblocked).
+  Finnhub and Alpha Vantage do **not** provide candles on these plans.
+- **Session detection:** Finnhub `market-status` (plus the local calendar).
+- **Short/float fuel:** FINRA short-interest + RegSHO; float from Finviz.
+- **Alpaca:** adapter built, fails soft, **BLOCKED** until the key is regenerated.
