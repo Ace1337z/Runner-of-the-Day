@@ -30,6 +30,7 @@ from .gates import GateReport, run_gates
 from .normalize import (Canonical, PricePoint, Snapshot, snapshot_from_finviz_rows)
 from .notifier import Notifier
 from .scoring import Ranking, Scored, rank, score_candidate
+from . import shadow
 from .state_machine import StateMachine, State, Transition
 from .store import Store
 from .tracker import PathTracker, Runner, build_runner_list
@@ -177,6 +178,10 @@ class Runtime:
                                    data_grade=snap.data_grade)
 
         sent = self._dispatch(day, mode, now, rk, snap, transitions)
+
+        # shadow clock (§17 Phase 6): count the session and log (never push) alerts
+        n_ign = sum(1 for s in sent if s.get("kind") == "IGNITION")
+        shadow.note_cycle(self.store, day, alerts=n_ign)
 
         # persist snapshot + decisions
         self.store.save_snapshot(day, mode, now, snap.data_grade, snap.quality,

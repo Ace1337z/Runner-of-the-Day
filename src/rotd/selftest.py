@@ -104,6 +104,7 @@ def run(cfg: Config, verbose: bool = False) -> int:
         _determinism_check(cfg, results, step)
         _notifier_check(cfg, results, step)
         _store_check(cfg, results, step)
+        _shadow_check(cfg, results, step)
         _auditor_checks(cfg, results, step)
         _runtime_audit_check(cfg, results, step)
     except SelftestFailure as exc:
@@ -218,6 +219,52 @@ def _determinism_check(cfg: Config, results, step) -> None:
     _check(a.payload_hash == b.payload_hash, "snapshot hash not stable", results,
            "AC1/S5 determinism: identical hash twice")
     step("determinism")
+
+
+def _shadow_check(cfg: Config, results, step) -> None:
+    """The 10-trading-day shadow clock must count sessions, not calendar days (§17)."""
+    from . import shadow
+    import shutil
+    td = Path(tempfile.mkdtemp(prefix="rotd-shadow-"))
+    try:
+        st = Store(td / "s.db")
+        # 2026-10-13 is a Tuesday; 10 trading days later is 2026-10-27 (no holidays).
+        start_day = date(2026, 10, 13)
+        s0 = shadow.start(st, start_day)
+        _check(s0.started == start_day and s0.sessions_done == 1,
+               "shadow clock did not start correctly", results,
+               "shadow: clock starts on a trading day")
+        shadow.note_cycle(st, start_day, alerts=2)
+        _check(st.get_meta("shadow_cycles") == "1" and st.get_meta("shadow_alerts") == "2",
+               "shadow cycle/alert counters wrong", results,
+               "shadow: cycles and alerts are counted")
+        # skip a weekend evening: a non-trading day must not advance the clock
+        shadow.note_cycle(st, date(2026, 10, 11))
+        s1 = shadow.status(st, cfg=cfg)
+        _check(s1.sessions_done == 1, "weekend advanced the shadow clock", results,
+               "shadow: weekends do not advance the clock")
+        # reach the required count: 10 sessions from 2026-10-13 is 2026-10-26
+        shadow.note_cycle(st, date(2026, 10, 26), alerts=1)
+        s2 = shadow.status(st, cfg=cfg)
+        _check(s2.sessions_done == 10 and s2.complete and s2.live_allowed,
+               f"shadow clock should be complete, got {s2.sessions_done}",
+               results, "shadow: completes after the required sessions")
+        # a live push is blocked until the clock completes
+        prev_shadow = cfg.raw("SHADOW")
+        cfg._values["SHADOW"] = "1"
+        st.set_meta("shadow_last_seen", "2026-10-20")
+        s3 = shadow.status(st, cfg=cfg)
+        _check(not s3.live_allowed and s3.reason == shadow.R_CLOCK_INCOMPLETE,
+               "incomplete clock allowed a live push", results,
+               "shadow: live pushes blocked while incomplete")
+        if prev_shadow == "":
+            cfg._values.pop("SHADOW", None)
+        else:
+            cfg._values["SHADOW"] = prev_shadow
+        st.close()
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+    step("shadow clock")
 
 
 def _notifier_check(cfg: Config, results, step) -> None:

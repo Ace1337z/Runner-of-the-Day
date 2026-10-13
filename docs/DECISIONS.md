@@ -23,6 +23,22 @@ magic number in code.
 - Determinism: same stored inputs → byte-identical decisions (AC1, S5).
 - Log everything including rejects.
 
+## §10 catalyst service = the methodology_v3 red-team auditor
+
+`docs/methodology_v3.md` (also copied to `src/rotd/prompts/methodology_v3.md` as
+the shipped contract) is a full **red-team auditor**, not a light classifier.
+A4 was chosen: `src/rotd/auditor.py` builds one **FACT BUNDLE** per alert (§4
+field guide), loads the exact system prompt between its `BEGIN/END SYSTEM
+PROMPT` markers, and validates the returned `decision_v3` report with the A4
+post-parse checks (reject, never repair). Code computes a **mechanical verdict**
+(`mechanical_verdict`) and the model may never exceed it ("strongest
+hardening"). The model only *classifies and audits* — it never ranks, scores or
+times. The service runs off the decision path (`Runtime._audit_candidates`,
+async in live mode) and falls back to the rules-only block on no-model, timeout,
+bad response or a failed check. `CatalystService.audit_report` is the runtime
+entry point; the 0..100 `CatalystService.report_score` is the only number the
+Stage-1 scorer reads from it.
+
 ## Data-source reality (from VERIFIED.md §G)
 
 - **Finviz** = primary (universe, movers, quote rows, news, filings, extended-hours price).

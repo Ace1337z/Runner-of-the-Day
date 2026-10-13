@@ -96,6 +96,11 @@ def cmd_doctor(cfg: Config, args: argparse.Namespace) -> int:
     cat = CatalystService(cfg, store)
     ok, msg = cat.health()
     out["checks"]["catalyst"] = {"ok": ok, "message": msg}
+    # the shadow clock (§17 Phase 6): a live push is blocked until it completes
+    from . import shadow
+    sst = shadow.status(store, cfg=cfg)
+    out["checks"]["shadow_clock"] = {"ok": (not sst.enabled) or sst.complete,
+                                     "message": sst.line(), **sst.as_dict()}
     # the methodology_v3 auditor prompt must load and carry its markers (§10)
     try:
         from .auditor import load_system_prompt
@@ -144,22 +149,76 @@ def cmd_shadow(cfg: Config, args: argparse.Namespace) -> int:
     return _run(cfg, args, live=False)
 
 
+def cmd_shadow_status(cfg: Config, args: argparse.Namespace) -> int:
+    from . import shadow
+    store = Store(cfg.db_path)
+    st = shadow.status(store, cfg=cfg)
+    store.close()
+    if args.json:
+        print(json.dumps(st.as_dict(), indent=2, default=str))
+    else:
+        print(st.line())
+        if st.started:
+            print(f"  started {st.started}  last seen {st.last_seen}  "
+                  f"required {st.sessions_required} trading days")
+    return 0
+
+
+def cmd_shadow_start(cfg: Config, args: argparse.Namespace) -> int:
+    from . import shadow
+    store = Store(cfg.db_path)
+    si = session_info()
+    try:
+        day = date.fromisoformat(args.date) if args.date else si.trading_day
+    except ValueError:
+        print(f"bad date: {args.date} (want YYYY-MM-DD)")
+        store.close()
+        return 2
+    try:
+        st = shadow.start(store, day, force=args.force)
+    except ValueError as exc:
+        print(str(exc))
+        store.close()
+        return 2
+    store.set_meta("shadow_enabled", "1")
+    print(f"shadow clock started on {day}")
+    print(st.line())
+    store.close()
+    return 0
+
+
 def cmd_run(cfg: Config, args: argparse.Namespace) -> int:
     return _run(cfg, args, live=True)
 
 
 def _run(cfg: Config, args: argparse.Namespace, live: bool) -> int:
+    from . import shadow
     store = Store(cfg.db_path)
-    rt, clients, tg = _build(cfg, store, use_fake_telegram=not cfg.bool("SHADOW") and not live)
+    shadow_enabled = cfg.bool("SHADOW")
+    # Phase 6 gate: a live run may not push until the shadow clock has completed.
+    if live and not shadow.live_allowed(store, cfg):
+        si0 = session_info()
+        if cfg.bool("SHADOW_AUTOSTART") and cfg.bool("SHADOW"):
+            shadow.start(store, si0.trading_day)
+        st = shadow.status(store, cfg=cfg)
+        print(f"live pushes blocked: {st.reason} ({st.sessions_done}/{st.sessions_required} "
+              f"shadow trading days). Run 'rotd shadow' first.")
+        store.close()
+        return 3
+    rt, clients, tg = _build(cfg, store, use_fake_telegram=not shadow_enabled and not live)
     si = session_info()
     print(f"cycle at {fmt_ts(now_utc())}  mode={si.mode}  day={si.trading_day}  "
-          f"shadow={cfg.bool('SHADOW')}")
+          f"shadow={shadow_enabled}")
+    if shadow_enabled and cfg.bool("SHADOW_AUTOSTART") and store.get_meta("shadow_start") is None:
+        shadow.start(store, si.trading_day)
     res = rt.cycle(si.mode, si.trading_day)
     print(f"  snapshot: grade {res.snapshot.data_grade}, {len(res.snapshot.records)} names")
     print(f"  ranked: {len(res.ranking.day_ranked)}  board: {[s.symbol for s in res.ranking.board]}")
     print(f"  rotd: {res.ranking.rotd.symbol if res.ranking.rotd else 'none'} "
           f"({res.ranking.rotd_reason})")
     print(f"  transitions: {len(res.transitions)}  sent: {len(res.sent)}")
+    if shadow_enabled:
+        print(f"  {shadow.status(store, cfg=cfg).line()}")
     store.close()
     return 0
 
@@ -204,6 +263,8 @@ def cmd_status(cfg: Config, args: argparse.Namespace) -> int:
         print("  last snapshot: none today")
     n = store.count_alerts(si.trading_day, "IGNITION")
     print(f"  ignition budget used: {n}/{cfg.int('ALERT_BUDGET_PER_DAY', 3)}")
+    from . import shadow
+    print(f"  {shadow.status(store, cfg=cfg).line()}")
     for a in store.alerts_for_day(si.trading_day, kind="IGNITION"):
         print(f"    - ${a['symbol']} slot {a['budget_slot']} score {a['score']}")
     print("  recent events:")
@@ -253,6 +314,15 @@ def build_parser() -> argparse.ArgumentParser:
     sh = sub.add_parser("shadow", help="run cycles and log; push nothing")
     sh.add_argument("--once", action="store_true")
     sh.set_defaults(func=cmd_shadow)
+
+    sst = sub.add_parser("shadow-status", help="show the 10-trading-day shadow clock")
+    sst.add_argument("--json", action="store_true")
+    sst.set_defaults(func=cmd_shadow_status)
+
+    sstt = sub.add_parser("shadow-start", help="start the shadow clock on a trading day")
+    sstt.add_argument("--date", help="the trading day to start on (default: today)")
+    sstt.add_argument("--force", action="store_true", help="restart an existing clock")
+    sstt.set_defaults(func=cmd_shadow_start)
 
     rn = sub.add_parser("run", help="live run (honours SHADOW)")
     rn.add_argument("--once", action="store_true")

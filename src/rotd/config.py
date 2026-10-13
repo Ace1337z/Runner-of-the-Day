@@ -161,6 +161,8 @@ _GLOBAL: list[Setting] = [
     Setting("WATCHDOG_STALL_S", "180", "s", "A cycle taking longer than this trips the watchdog."),
     Setting("SHADOW", "0", "bool", "1 = decide and log but never push (rotd shadow)."),
     Setting("SELFTEST", "0", "bool", "1 = fully offline deterministic mode."),
+    Setting("SHADOW_DAYS_REQUIRED", "10", "trading_days", "Shadow clock length before live pushes are allowed (section 17 Phase 6)."),
+    Setting("SHADOW_AUTOSTART", "0", "bool", "1 = start the shadow clock automatically on the first shadow cycle."),
 
     # --- secrets (never displayed / never logged) ---
     Setting("FINVIZ_TOKEN", "", "", "Finviz Elite token.", secret=True),
