@@ -1,0 +1,26 @@
+{
+  "probe": "finra_short_interest_post",
+  "status": 200,
+  "method": "POST",
+  "url": "https://api.finra.org/data/group/otcMarket/name/consolidatedShortInterest",
+  "request_body": {
+    "limit": 500,
+    "fields": ["symbolCode", "settlementDate", "currentShortPositionQuantity", "averageDailyVolumeQuantity", "daysToCoverQuantity"],
+    "compareFilters": [{"fieldName": "symbolCode", "fieldValue": "AAPL", "compareType": "EQUAL"}]
+  },
+  "request_headers": {"User-Agent": "Mozilla/5.0 (compatible; ROTD/0.1)"},
+  "content_type": "text/csv",
+  "saved_at_utc": "2026-10-13T23:05:00Z",
+  "verified": {
+    "query_style": "POST JSON body with fields + compareFilters",
+    "response_body": "CSV with a header row",
+    "one_symbol_per_request": "multiple symbolCode EQUAL filters -> HTTP 204 empty body",
+    "sorting": "sortFields rejected: HTTP 400 'Sorting is allowed only if all partitions keys are specified'",
+    "row_order": "not stable across limit/offset; keep max settlementDate",
+    "accept_header": "Accept: text/csv yields HTTP 400; leave Accept at default (JSON)",
+    "rate": "burst-sensitive: rapid repeats return transient HTTP 400",
+    "recency": "newest settlementDate observed 2026-09-30 (~211 rows per symbol)",
+    "max_rows_per_symbol": 211
+  },
+  "note": "Full single-symbol history, used by FinraClient.short_interest (keeps the newest settlementDate)."
+}

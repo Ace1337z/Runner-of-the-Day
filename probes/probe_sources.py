@@ -54,8 +54,29 @@ def get(url: str, headers: dict[str, str] | None = None, timeout: float = 25.0):
         return -1, {}, f"ERROR {type(e).__name__}: {e}", time.time() - t0
 
 
+SHORT_INT_URL = "https://api.finra.org/data/group/otcMarket/name/consolidatedShortInterest"
+
+
+def _post_json(url: str, body: dict, headers: dict[str, str] | None = None,
+               timeout: float = 25.0) -> tuple[int, str]:
+    """POST a JSON body; return (status, text). FINRA rejects an explicit
+    ``Accept: text/csv`` header with 400, so the caller controls headers."""
+    data = json.dumps(body).encode("utf-8")
+    hdrs = {"User-Agent": "rotd-probe/0.1", "Content-Type": "application/json"}
+    hdrs.update(headers or {})
+    req = urllib.request.Request(url, data=data, headers=hdrs, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", "replace")
+    except Exception as e:  # noqa: BLE001
+        return -1, f"ERROR {type(e).__name__}: {e}"
+
+
 def save(name: str, status: int, body: str, extra: dict | None = None) -> None:
-    meta = {"probe": name, "status": status, "saved_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    meta = {"probe": name, "status": status,
+            "saved_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     if extra:
         meta.update(extra)
     text = body if isinstance(body, str) else str(body)
@@ -186,11 +207,23 @@ def probe_yahoo() -> None:
 
 def probe_finra() -> None:
     # FINRA daily short-sale volume file list (used by penny's finra adapter).
-    st, _, body, _ = get("https://cdn.finra.org/equity/regsho/daily/CNMSshvol20261013.txt")
+    # A browser-like User-Agent is required; the default Python UA is 403.
+    st, _, body, _ = get("https://cdn.finra.org/equity/regsho/daily/CNMSshvol20261013.txt",
+                         headers={"User-Agent": "Mozilla/5.0 (compatible; ROTD/0.1)"})
     save("finra_regsho", st, body[:100000])
-    st2, _, body2, _ = get("https://api.finra.org/data/group/otcMarket/name/consolidatedShortInterest?limit=2",
-                          headers={"Accept": "application/json"})
-    save("finra_short_interest", st2, body2[:100000])
+    # Consolidated short interest: POST a JSON body, receive CSV. One symbol per
+    # request (multiple EQUAL filters -> HTTP 204). See probe_finra_short.py for
+    # the paging / ordering probe and fixtures/finra_short_interest_post.meta.json.
+    si_body = {
+        "limit": 500,
+        "fields": ["symbolCode", "settlementDate", "currentShortPositionQuantity",
+                   "averageDailyVolumeQuantity", "daysToCoverQuantity"],
+        "compareFilters": [{"fieldName": "symbolCode", "fieldValue": "AAPL",
+                            "compareType": "EQUAL"}],
+    }
+    resp = _post_json(SHORT_INT_URL, si_body,
+                      headers={"User-Agent": "Mozilla/5.0 (compatible; ROTD/0.1)"})
+    save("finra_short_interest_post", resp[0], resp[1][:100000])
 
 
 PROBES = {

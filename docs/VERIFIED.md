@@ -119,8 +119,8 @@ and are never logged or committed.
 | G-12 | SEC EDGAR | Atom filings, `company_tickers.json`, daily index | 200 | All work with a `User-Agent` and `Accept-Encoding: identity`. Atom is ISO-8859-1 — the adapter must not assume UTF-8. |
 | G-13 | Yahoo | `chart` | 200 | Works; `meta.hasPrePostMarketData: true`, `exchangeTimezoneName: America/New_York`. Usable as last-resort bars/regime. |
 | G-14 | Yahoo | `v7/finance/quote` | **401** | Yahoo deprecated the v7 quote endpoint. Use `chart` only. |
-| G-15 | FINRA | RegSHO daily short-volume txt | 200 | `Date|Symbol|ShortVolume|ShortExemptVolume|TotalVolume|Market` — daily short-sale volume works. |
-| G-16 | FINRA | `consolidatedShortInterest` API | 200 | JSON short-interest works (`currentShortPositionQuantity`, `averageDailyVolumeQuantity`, `settlementDate`). |
+| G-15 | FINRA | RegSHO daily short-volume txt | 200 | `Date|Symbol|ShortVolume|ShortExemptVolume|TotalVolume|Market` — daily short-sale volume works. A browser-like `User-Agent` is required (default Python UA is 403). |
+| G-16 | FINRA | `consolidatedShortInterest` API | 200 | **POST** a JSON body (`fields` + `compareFilters`) and the reply is **CSV** (not JSON; the earlier probe only proved reachability with `?limit=2`). Corrected details: (a) **exactly one** `symbolCode` EQUAL filter per request — multiple filters return **HTTP 204** with an empty body, so the adapter loops per symbol; (b) `sortFields` is **rejected** (HTTP 400 "Sorting is allowed only if all partitions keys are specified") and row order is **not stable** across limit/offset (newest-first at limit=1000, oldest-first at limit=150) → never trust order, keep the greatest `settlementDate`; (c) an `Accept: text/csv` header yields **HTTP 400**, leaving `Accept` at its JSON default works; (d) the API is **burst-sensitive** (rapid repeats return a transient 400); (e) ~211 rows per symbol, newest settlement observed **2026-09-30**. |
 
 ### Consequences for the build
 
