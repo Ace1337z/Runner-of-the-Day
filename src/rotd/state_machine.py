@@ -1,0 +1,341 @@
+"""The candidate state machine and the alert budget (build prompt §11).
+
+States (§11.1), from lowest to highest commitment::
+
+    WATCH -> QUALIFIED -> BOARD -> ARMED -> IGNITION
+
+plus terminal/transient ``ABORT``, ``DEGRADED``, ``RECOVERED``, and
+``HALTED_SUSPENDED``. Transitions use hysteresis so a name does not flap:
+
+- QUALIFIED requires ``QUALIFY_CONSEC`` consecutive fully-gated cycles.
+- BOARD entry needs the name in the top-``BOARD_SIZE``; exit needs it to fall
+  below ``BOARD_EXIT_RANK`` and to have held BOARD at least ``BOARD_MIN_DWELL_S``.
+- ARMED needs rank <= ``ARM_MAX_RANK`` and score >= ``ARM_MIN_SCORE``.
+- IGNITION needs a confirmed bar cross and price within ``CHASE_CAP_PCT`` of the
+  armed level (no chasing an extended move).
+
+Alert budget (§11.2): at most ``ALERT_BUDGET_PER_DAY`` IGNITION pushes per trading
+day, plus ``RESERVE_SLOTS`` for a candidate scoring at/above
+``EXCEPTIONAL_SCORE``. Two ignitions must be at least ``ALERT_MIN_GAP_MIN`` apart
+(A3). BOARD/ABORT/DEGRADED/RECOVERED never count against the budget.
+
+A4 (no double-alert): a name already ignited today cannot ignite again.
+A6: BOARD messages are on a fixed silent schedule.
+
+Every transition is returned as a :class:`Transition` with a machine reason code
+so the store can log even the rejects.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
+from enum import Enum
+from typing import Any, Optional
+
+from .config import Config
+from .scoring import Ranking, Scored
+from .util import as_utc, now_utc
+
+log = logging.getLogger(__name__)
+
+
+class State(str, Enum):
+    WATCH = "WATCH"
+    QUALIFIED = "QUALIFIED"
+    BOARD = "BOARD"
+    ARMED = "ARMED"
+    IGNITION = "IGNITION"
+    ABORT = "ABORT"
+    DEGRADED = "DEGRADED"
+    RECOVERED = "RECOVERED"
+    HALTED_SUSPENDED = "HALTED_SUSPENDED"
+
+
+# Reason codes for every transition (explainability rule).
+R_QUALIFY = "QUALIFY_CONSEC_MET"
+R_QUALIFY_WAIT = "QUALIFY_CONSEC_PENDING"
+R_BOARD_ENTER = "BOARD_ENTER"
+R_BOARD_HOLD = "BOARD_HOLD_DWELL"
+R_BOARD_EXIT = "BOARD_EXIT_RANK"
+R_ARM = "ARM_RANK_AND_SCORE"
+R_ARM_CHASE = "ARM_CHASE_CAP"
+R_ARM_RANK = "ARM_RANK_TOO_LOW"
+R_ARM_SCORE = "ARM_SCORE_TOO_LOW"
+R_IGNITE = "IGNITION_CONFIRMED"
+R_IGNITE_BUDGET = "IGNITION_BUDGET_EXHAUSTED"
+R_IGNITE_DUP = "IGNITION_ALREADY_TODAY"
+R_IGNITE_GAP = "IGNITION_MIN_GAP"
+R_IGNITE_PHASE = "IGNITION_PHASE_CLOSED"
+R_ABORT_VWAP = "ABORT_BELOW_VWAP"
+R_ABORT_SPREAD = "ABORT_SPREAD_WIDE"
+R_ABORT_DATA = "ABORT_DATA_QUALITY"
+R_DEGRADE = "DEGRADED_DATA"
+R_RECOVER = "RECOVERED_DATA"
+R_SUSPEND = "HALTED_SUSPENDED"
+R_DROP = "DROPPED_OUT_OF_GATES"
+
+
+@dataclass
+class Transition:
+    symbol: str
+    prev_state: State
+    new_state: State
+    reason: str
+    detail: str = ""
+    spend: bool = False          # does this transition consume an ignition slot?
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"symbol": self.symbol, "from": self.prev_state.value,
+                "to": self.new_state.value, "reason": self.reason,
+                "detail": self.detail, "spend": self.spend}
+
+
+@dataclass
+class Budget:
+    """Per-day ignition budget with a reserve for exceptional names (A4)."""
+    day: date
+    limit: int
+    reserve: int
+    spent: list[dict[str, Any]] = field(default_factory=list)
+    reserve_spent: int = 0
+    ignited_symbols: set[str] = field(default_factory=set)
+    last_ignition_at: Optional[datetime] = None
+
+    @property
+    def used(self) -> int:
+        return len(self.spent)
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self.limit - self.used)
+
+    def can_spend(self, score: float, cfg: Config, symbol: str,
+                  now: Optional[datetime] = None) -> tuple[bool, str]:
+        sym = symbol.upper()
+        if sym in self.ignited_symbols:
+            return False, R_IGNITE_DUP
+        now = now or now_utc()
+        gap = cfg.float("ALERT_MIN_GAP_MIN", 15)
+        if self.last_ignition_at and (now - self.last_ignition_at) < timedelta(minutes=gap):
+            return False, R_IGNITE_GAP
+        if self.remaining > 0:
+            return True, "BUDGET"
+        exceptional = cfg.float("EXCEPTIONAL_SCORE", 90)
+        if score >= exceptional and self.reserve_spent < self.reserve:
+            return True, "RESERVE"
+        return False, R_IGNITE_BUDGET
+
+    def spend(self, symbol: str, slot: str, score: float,
+              now: Optional[datetime] = None) -> None:
+        now = now or now_utc()
+        sym = symbol.upper()
+        self.ignited_symbols.add(sym)
+        self.spent.append({"symbol": sym, "slot": slot, "score": score, "at": now.isoformat()})
+        if slot == "RESERVE":
+            self.reserve_spent += 1
+        self.last_ignition_at = now
+
+    def slot_label(self) -> str:
+        if self.remaining > 0:
+            return f"{self.used + 1}/{self.limit}"
+        return "RESERVE"
+
+
+@dataclass
+class SymbolState:
+    symbol: str
+    state: State = State.WATCH
+    consecutive_qualified: int = 0
+    board_since: Optional[datetime] = None
+    armed_level: Optional[float] = None
+    armed_at: Optional[datetime] = None
+    last_seen: Optional[datetime] = None
+    degraded_from: Optional[State] = None
+    confirm_bars: int = 0
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"state": self.state.value, "consec": self.consecutive_qualified,
+                "board_since": self.board_since.isoformat() if self.board_since else None,
+                "armed_level": self.armed_level}
+
+
+class StateMachine:
+    """Holds per-symbol state and applies one cycle of transitions."""
+
+    def __init__(self, cfg: Config, day: date):
+        self.cfg = cfg
+        self.day = day
+        self.states: dict[str, SymbolState] = {}
+        self.budget = Budget(day=day, limit=cfg.int("ALERT_BUDGET_PER_DAY", 3),
+                             reserve=cfg.int("RESERVE_SLOTS", 1))
+
+    def _st(self, symbol: str) -> SymbolState:
+        s = self.states.get(symbol)
+        if s is None:
+            s = SymbolState(symbol=symbol)
+            self.states[symbol] = s
+        return s
+
+    def step(self, ranking: Ranking, records: dict[str, Any], mode: str,
+             now: Optional[datetime] = None,
+             prices: Optional[dict[str, float]] = None,
+             vwaps: Optional[dict[str, float]] = None,
+             data_grade: str = "A") -> list[Transition]:
+        """Advance every symbol one cycle and return the transitions."""
+        now = as_utc(now or now_utc())
+        prices = prices or {}
+        vwaps = vwaps or {}
+        out: list[Transition] = []
+
+        board_syms = {s.symbol for s in ranking.board}
+        rank_of = {s.symbol: s.rank for s in ranking.day_ranked}
+        score_of = {s.symbol: s.score for s in ranking.day_ranked}
+        qualified_syms = {s.symbol for s in ranking.day_ranked}
+
+        # Extra symbols seen this cycle that are not ranked (still advance state).
+        seen = set(qualified_syms) | set(records.keys())
+
+        for sym in seen:
+            st = self._st(sym)
+            prev = st.state
+            st.last_seen = now
+            rec = records.get(sym)
+
+            # --- data-quality driven degradation ---
+            if rec is not None and getattr(rec, "price", None) is None:
+                if prev not in (State.HALTED_SUSPENDED,):
+                    out.append(self._move(st, State.HALTED_SUSPENDED, R_SUSPEND,
+                                          "no fresh quote"))
+                continue
+            if data_grade in ("D", "F") and prev == State.IGNITION:
+                st.degraded_from = State.IGNITION
+                out.append(self._move(st, State.DEGRADED, R_DEGRADE, f"grade {data_grade}"))
+                continue
+            if prev == State.DEGRADED and data_grade in ("A", "B", "C"):
+                back = st.degraded_from or State.WATCH
+                out.append(self._move(st, State.RECOVERED, R_RECOVER, f"back to {back.value}"))
+                st.state = back
+                prev = back
+
+            if sym not in qualified_syms:
+                # Fell out of the gates: drop out of the upper states.
+                if prev in (State.QUALIFIED, State.BOARD, State.ARMED):
+                    out.append(self._move(st, State.WATCH, R_DROP, "failed gates"))
+                    st.consecutive_qualified = 0
+                continue
+
+            # --- WATCH -> QUALIFIED (consecutive fully-gated cycles) ---
+            if prev == State.WATCH:
+                st.consecutive_qualified += 1
+                need = self.cfg.int("QUALIFY_CONSEC", 2)
+                if st.consecutive_qualified >= need:
+                    out.append(self._move(st, State.QUALIFIED, R_QUALIFY,
+                                          f"{st.consecutive_qualified}>={need}"))
+                else:
+                    out.append(Transition(sym, prev, State.WATCH, R_QUALIFY_WAIT,
+                                          f"{st.consecutive_qualified}/{need}"))
+                prev = st.state
+                if prev != State.QUALIFIED:
+                    continue
+
+            # --- QUALIFIED <-> BOARD (hysteresis) ---
+            if prev == State.QUALIFIED:
+                if sym in board_syms:
+                    out.append(self._move(st, State.BOARD, R_BOARD_ENTER,
+                                          f"rank {rank_of.get(sym)}"))
+                    st.board_since = now
+                prev = st.state
+
+            if prev == State.BOARD:
+                exit_rank = self.cfg.int("BOARD_EXIT_RANK", 8)
+                dwell = self.cfg.float("BOARD_MIN_DWELL_S", 60)
+                held = (now - st.board_since).total_seconds() if st.board_since else 1e9
+                if sym not in board_syms and (rank_of.get(sym, 999) > exit_rank) and held >= dwell:
+                    out.append(self._move(st, State.QUALIFIED, R_BOARD_EXIT,
+                                          f"rank {rank_of.get(sym)}"))
+                else:
+                    out.append(Transition(sym, prev, State.BOARD, R_BOARD_HOLD,
+                                          f"rank {rank_of.get(sym)}"))
+                prev = st.state
+                if prev != State.BOARD:
+                    continue
+
+            # --- BOARD -> ARMED ---
+            check_arm = prev in (State.QUALIFIED, State.BOARD)
+            if check_arm:
+                rank = rank_of.get(sym, 999)
+                score = score_of.get(sym, 0.0)
+                if rank > self.cfg.int("ARM_MAX_RANK", 2):
+                    out.append(Transition(sym, prev, prev, R_ARM_RANK, f"rank {rank}"))
+                    continue
+                if score < self.cfg.float("ARM_MIN_SCORE", 75):
+                    out.append(Transition(sym, prev, prev, R_ARM_SCORE, f"score {score:.1f}"))
+                    continue
+                price = prices.get(sym)
+                if price is None and rec is not None:
+                    price = getattr(rec, "price", None)
+                st.armed_level = price
+                st.armed_at = now
+                out.append(self._move(st, State.ARMED, R_ARM,
+                                      f"rank {rank}, score {score:.1f}"))
+                prev = st.state
+
+            # --- ARMED -> IGNITION ---
+            if prev == State.ARMED:
+                price = prices.get(sym) or (getattr(rec, "price", None) if rec else None)
+                armed = st.armed_level
+                # Chase cap: never ignite far above the armed level.
+                if price and armed and armed > 0:
+                    chase = (price - armed) / armed * 100.0
+                    if chase > self.cfg.float("CHASE_CAP_PCT", 4.0):
+                        out.append(Transition(sym, prev, State.ARMED, R_ARM_CHASE,
+                                              f"+{chase:.1f}% above armed"))
+                        continue
+                # Confirmation bars (extended needs more than regular).
+                need = (self.cfg.int("EXT_CONFIRM_BARS", 2) if mode in ("PRE", "POST", "OVERNIGHT")
+                        else self.cfg.int("REG_CONFIRM_BARS", 1))
+                st.confirm_bars += 1
+                if st.confirm_bars < need:
+                    out.append(Transition(sym, prev, State.ARMED, "IGNITION_PENDING",
+                                          f"confirm {st.confirm_bars}/{need}"))
+                    continue
+                # Phase must allow ignition.
+                if not self.cfg.bool(f"{mode}_ALLOW_IGNITION", mode not in ("OVERNIGHT", "CLOSED")):
+                    out.append(Transition(sym, prev, State.ARMED, R_IGNITE_PHASE, mode))
+                    continue
+                # Budget.
+                score = score_of.get(sym, 0.0)
+                ok, why = self.budget.can_spend(score, self.cfg, sym, now)
+                if not ok:
+                    out.append(Transition(sym, prev, State.ARMED, why, f"budget {self.budget.used}/{self.budget.limit}"))
+                    continue
+                slot = self.budget.slot_label()
+                self.budget.spend(sym, "RESERVE" if slot == "RESERVE" else slot, score, now)
+                out.append(self._move(st, State.IGNITION, R_IGNITE,
+                                      f"slot {slot}, score {score:.1f}", spend=True))
+
+        return out
+
+    # -- abort checks (run continuously on ignited names) -------------------
+    def check_aborts(self, prices: dict[str, float], vwaps: dict[str, float],
+                     now: Optional[datetime] = None) -> list[Transition]:
+        now = as_utc(now or now_utc())
+        out: list[Transition] = []
+        for sym, st in self.states.items():
+            if st.state != State.IGNITION:
+                continue
+            price = prices.get(sym)
+            vwap = vwaps.get(sym)
+            if price is not None and vwap and price < vwap:
+                out.append(self._move(st, State.ABORT, R_ABORT_VWAP,
+                                      f"{price:.4f} < vwap {vwap:.4f}"))
+        return out
+
+    @staticmethod
+    def _move(st: SymbolState, new: State, reason: str, detail: str = "",
+              spend: bool = False) -> Transition:
+        prev = st.state
+        st.state = new
+        return Transition(st.symbol, prev, new, reason, detail, spend)
