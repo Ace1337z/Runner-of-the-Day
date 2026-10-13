@@ -136,6 +136,15 @@ _GLOBAL: list[Setting] = [
     Setting("CATALYST_TOP_N_EARLY", "10", "rank", "Audit a candidate's catalyst early once it reaches this rank."),
     Setting("CATALYST_CACHE_TTL_H", "24", "hours", "Cache a catalyst audit by (symbol, item id)."),
     Setting("CATALYST_TIMEOUT_S", "45", "s", "LLM call timeout; on timeout the catalyst is UNKNOWN."),
+    Setting("AI_PROMPT_FILE", "methodology_v3.md", "file", "System prompt file under prompts/ (§10)."),
+    Setting("AI_TEMPERATURE", "0.0", "float", "Auditor temperature; 0 is required by A6."),
+    Setting("AI_MAX_TOKENS", "1200", "tokens", "Auditor response cap (A6: near 1200)."),
+    Setting("AI_CAUSE_WINDOW_H", "4", "hours", "A news item is FRESH inside this window (§10 A3)."),
+    Setting("MIN_RR", "2.0", "ratio", "Minimum risk:reward; ENTER below this downgrades to ARMED (A4.9)."),
+    Setting("CALIBRATION_CLAMP", "0.25", "float", "Max number of confidence grades a calibration may move (A4.10)."),
+    Setting("DILUTION_BAND_HIGH", "60", "score", "dilution_score at/above this is band HIGH (§10 6.7)."),
+    Setting("DILUTION_BAND_MEDIUM", "35", "score", "dilution_score at/above this is band MEDIUM."),
+    Setting("PROMO_AMPLIFY_PCT", "0", "%", "Reserved: promoter-amplification threshold; 0 = disabled."),
 
     # --- discovery (section 6) ---
     Setting("CARRY_LOOKBACK_D", "90", "days", "Carry-list 'recent runner history' window (§6.4)."),

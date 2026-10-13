@@ -27,6 +27,9 @@ rotd = "rotd.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+rotd = ["prompts/*.md", "sources/fixtures/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

@@ -1,18 +1,22 @@
 """Catalyst service (build prompt §10).
 
-The language model **only classifies** news and filings — it never ranks, scores
-or times anything. It runs **asynchronously**, off the decision path: a cycle
-never blocks on a model call. Verdicts are cached by ``(symbol, item_id)`` for
-``CATALYST_CACHE_TTL_H``.
+Two layers, both off the decision path:
 
-A verdict is one of ``MAJOR`` / ``MINOR`` / ``NONE`` / ``UNKNOWN`` with a
-confidence 0..1, plus the headline and a one-line rationale. On timeout, missing
-credentials or a bad response the verdict is ``UNKNOWN`` — fail closed, never a
-false positive.
+1. :mod:`rotd.auditor` — the **methodology_v3 red-team auditor**. It builds one
+   FACT BUNDLE per alert and asks the model for a ``decision_v3`` DECISION
+   REPORT, then validates it (§10 A4). This is the primary §10 contract.
+2. :class:`CatalystService` — a thin, cached facade the runtime calls:
+   ``audit_report`` (the v3 report) and ``best_score`` (a 0..100 catalyst number
+   for the Stage-1 score, derived from the report's ``catalyst_quality``).
+
+The model **only classifies and audits** — it never ranks, scores or times
+anything. Verdicts are cached by ``(symbol, bundle-hash)`` for
+``CATALYST_CACHE_TTL_H``. On timeout, missing credentials or a bad response the
+result is the rules-only block — fail closed, never a false positive.
 
 The model endpoint is OpenAI-compatible (``AI_BASE_URL``/``AI_KEY``/``AI_MODEL``).
-When unset, the service returns ``UNKNOWN`` and logs once; the system runs fully
-without it.
+When unset, the service returns the rules-only block and logs once; the system
+runs fully without it.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
+from .auditor import AuditResult, AuditorService, BundleInputs, calibrated_confidence
 from .config import Config
 from .store import Store
 from .util import now_utc, stable_json
@@ -78,17 +83,74 @@ class CatalystVerdict:
 
 
 class CatalystService:
-    """Classifies catalysts asynchronously and caches the verdicts."""
+    """Classifies catalysts asynchronously and caches the verdicts.
 
-    def __init__(self, cfg: Config, store: Optional[Store] = None):
+    Wraps :class:`~rotd.auditor.AuditorService` for the methodology_v3 report and
+    exposes a 0..100 catalyst score for the Stage-1 scorer."""
+
+    def __init__(self, cfg: Config, store: Optional[Store] = None,
+                 auditor: Optional[AuditorService] = None):
         self.cfg = cfg
         self.store = store
+        self.auditor = auditor or AuditorService(cfg)
         self._inflight: set[tuple[str, str]] = set()
         self._lock = threading.Lock()
         self._warned = False
+        self._reports: dict[str, AuditResult] = {}
 
     def configured(self) -> bool:
-        return bool(self.cfg.raw("AI_BASE_URL") and self.cfg.raw("AI_KEY"))
+        return self.auditor.configured()
+
+    # -- methodology_v3 audit (§10) ----------------------------------------
+    def audit_report(self, inp: BundleInputs) -> AuditResult:
+        """Run (and cache) the full red-team audit for one candidate."""
+        res = self.auditor.audit(inp)
+        self._reports[inp.symbol.upper()] = res
+        return res
+
+    def audit_report_async(self, inp: BundleInputs, on_done=None) -> None:
+        """Audit without blocking the caller (a background daemon thread)."""
+        key = (inp.symbol.upper(), "audit")
+        with self._lock:
+            if key in self._inflight:
+                return
+            self._inflight.add(key)
+
+        def _run() -> None:
+            try:
+                res = self.audit_report(inp)
+                if on_done:
+                    on_done(res)
+            finally:
+                with self._lock:
+                    self._inflight.discard(key)
+
+        threading.Thread(target=_run, name=f"audit-{inp.symbol}", daemon=True).start()
+
+    def report(self, symbol: str) -> Optional[AuditResult]:
+        return self._reports.get(symbol.upper())
+
+    # -- score bridge -------------------------------------------------------
+    # catalyst_quality -> a 0..100 number for the Stage-1 CATALYST component.
+    # These are policy choices (a named setting would be overkill for six
+    # constants); the rationale is: a REAL credited cause is the strongest
+    # signal, financing/promotional are actively negative.
+    _QUALITY_SCORE = {
+        "REAL": 85.0, "WEAK": 40.0, "PROMOTIONAL": 15.0,
+        "DILUTIVE": 10.0, "NONE": 20.0, "UNKNOWN": None,
+    }
+
+    def report_score(self, symbol: str) -> Optional[float]:
+        """The 0..100 catalyst score from the cached audit report, or None."""
+        res = self._reports.get(symbol.upper())
+        if not res:
+            return None
+        base = self._QUALITY_SCORE.get(res.report.catalyst_quality)
+        if base is None:
+            return None
+        if res.report.verdict in ("REJECT", "NO_TRADE"):
+            base *= 0.5
+        return base * (0.5 + 0.5 * calibrated_confidence(res.report.confidence_band, self.cfg))
 
     # -- cache --------------------------------------------------------------
     def cached(self, symbol: str, item_id: str) -> Optional[CatalystVerdict]:
@@ -199,7 +261,11 @@ class CatalystService:
         threading.Thread(target=_run, name=f"catalyst-{symbol}-{item_id}", daemon=True).start()
 
     def best_score(self, symbol: str, items: list[dict[str, Any]]) -> Optional[float]:
-        """The best (highest) catalyst score among already-cached verdicts."""
+        """The best catalyst score: the v3 audit report if present, else the
+        cached per-item verdict scores."""
+        rep_score = self.report_score(symbol)
+        if rep_score is not None:
+            return rep_score
         best: Optional[float] = None
         for item in items:
             v = self.cached(symbol, str(item.get("id", "")))
@@ -209,5 +275,5 @@ class CatalystService:
 
     def health(self) -> tuple[bool, str]:
         if not self.configured():
-            return False, "no model configured (verdicts UNKNOWN)"
+            return False, "no model configured (rules-only verdicts)"
         return True, f"model {self.cfg.str('AI_MODEL', '?')}"

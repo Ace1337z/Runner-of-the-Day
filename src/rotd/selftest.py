@@ -104,6 +104,7 @@ def run(cfg: Config, verbose: bool = False) -> int:
         _determinism_check(cfg, results, step)
         _notifier_check(cfg, results, step)
         _store_check(cfg, results, step)
+        _auditor_checks(cfg, results, step)
     except SelftestFailure as exc:
         print(f"FAIL: {exc}")
         _print(results)
@@ -249,6 +250,72 @@ def _store_check(cfg: Config, results, step) -> None:
                results, "store: miss report round-trip")
         st.close()
     step("store round-trips")
+
+
+def _auditor_checks(cfg: Config, results, step) -> None:
+    """The methodology_v3 red-team auditor (§10) must load, build and validate."""
+    import re
+    from .auditor import (AuditorService, BundleInputs, build_fact_bundle,
+                          load_system_prompt, mechanical_verdict, validate_report)
+
+    # 1. the prompt loads between its own-line markers
+    prompt = load_system_prompt(cfg)
+    _check(len(prompt) > 5000 and prompt.lstrip().startswith("# 1. ROLE"),
+           "system prompt missing/truncated", results, "auditor: prompt loads")
+    step("auditor: prompt")
+
+    # 2. a bundle carries every §4 group with a null-safe shape
+    inp = BundleInputs(symbol="EXMP", price=2.31, gate_passed=True, rules_verdict="ENTER",
+                       phase="FRONT_SIDE", dilution_band="LOW",
+                       news={"status": "OK", "items": [{"id": "N1", "headline": "x"}]})
+    bundle = build_fact_bundle(inp, cfg)
+    _check(set(bundle) >= {"meta", "tape", "book", "fuel", "supply", "phase",
+                           "gate", "rules", "levels", "news", "filings", "context"},
+           "bundle missing a §4 group", results, "auditor: bundle shape")
+
+    # 3. both documented examples validate and the mechanical verdict holds
+    doc = (Path(__file__).resolve().parent / "prompts" / "methodology_v3.md").read_text("utf-8")
+    blocks = []
+    for body in re.findall(r"```json\n(.*?)\n```", doc, flags=re.S):
+        try:
+            blocks.append(json.loads(body))
+        except ValueError:
+            pass
+    bundles = {b["meta"]["ticker"]: b for b in blocks
+               if isinstance(b.get("meta"), dict) and "ticker" in b["meta"]}
+    reports = {r["ticker"]: r for r in blocks
+               if r.get("schema") == "decision_v3" and "ticker" in r}
+    _check("EXMP" in bundles and "EXMQ" in bundles, "examples not found", results,
+           "auditor: example bundles present")
+    for ticker, out in reports.items():
+        rep, failures = validate_report(out, bundles[ticker], cfg)
+        _check(rep is not None, f"example {ticker} rejected: {failures[:2]}", results,
+               f"auditor: example {ticker} validates")
+        mech, _ = mechanical_verdict(out["rubric"], bundles[ticker]["gate"]["passed"],
+                                     out["supply_state"], out["cause"]["kind"])
+        _check(mech == out["verdict"], f"mechanical verdict {mech} != {out['verdict']}",
+               results, f"auditor: mechanical verdict {ticker}")
+
+    # 4. a bad report is rejected, never repaired (numbers-in-text / verdict ceiling)
+    good = dict(reports["EXMP"])
+    cap_break = dict(good, caps_applied=["NO_IGNITION"])  # ENTER above a cap
+    rep_bad, fail_bad = validate_report(cap_break, bundles["EXMP"], cfg)
+    _check(rep_bad is None and fail_bad, "cap-breaking report not rejected", results,
+           "auditor: rejects verdict above a cap")
+    ref_bad = dict(good, reason_refs=["N9"])
+    rep_ref, fail_ref = validate_report(ref_bad, bundles["EXMP"], cfg)
+    _check(rep_ref is None and fail_ref, "unknown ref not rejected", results,
+           "auditor: rejects unknown ref")
+
+    # 5. the service falls back to rules-only when the model call fails (fail closed)
+    def _boom(system: str, user: str) -> str:
+        raise RuntimeError("no network in selftest")
+
+    svc = AuditorService(cfg, caller=_boom)
+    res = svc.audit(BundleInputs(symbol="EXMP", gate_passed=False, rules_verdict="REJECT"))
+    _check(res.report.source == "rules", "auditor did not fall back to rules", results,
+           "auditor: rules-only fallback")
+    step("auditor: methodology_v3")
 
 
 def _print(results) -> None:

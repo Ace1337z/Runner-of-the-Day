@@ -96,6 +96,15 @@ def cmd_doctor(cfg: Config, args: argparse.Namespace) -> int:
     cat = CatalystService(cfg, store)
     ok, msg = cat.health()
     out["checks"]["catalyst"] = {"ok": ok, "message": msg}
+    # the methodology_v3 auditor prompt must load and carry its markers (§10)
+    try:
+        from .auditor import load_system_prompt
+        prompt = load_system_prompt(cfg)
+        out["checks"]["auditor_prompt"] = {
+            "ok": len(prompt) > 5000, "message": f"{cfg.str('AI_PROMPT_FILE', '?')} "
+            f"({len(prompt)} chars)", "prompt_chars": len(prompt)}
+    except Exception as exc:  # noqa: BLE001
+        out["checks"]["auditor_prompt"] = {"ok": False, "message": str(exc)}
     # disk
     try:
         import shutil
