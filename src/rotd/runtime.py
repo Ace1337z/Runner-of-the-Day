@@ -22,17 +22,18 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, Optional
 
+from .auditor import BundleInputs
 from .catalyst import CatalystService
 from .config import Config
-from .features import compute_features
-from .gates import run_gates
+from .features import FeatureSet, compute_features
+from .gates import GateReport, run_gates
 from .normalize import (Canonical, PricePoint, Snapshot, snapshot_from_finviz_rows)
 from .notifier import Notifier
 from .scoring import Ranking, Scored, rank, score_candidate
 from .state_machine import StateMachine, State, Transition
 from .store import Store
 from .tracker import PathTracker, Runner, build_runner_list
-from .util import as_utc, now_utc
+from .util import as_utc, fmt_ts, now_utc
 
 log = logging.getLogger(__name__)
 
@@ -44,12 +45,14 @@ class CycleResult:
     transitions: list[Transition] = field(default_factory=list)
     gate_failures: dict[str, str] = field(default_factory=dict)
     sent: list[dict[str, Any]] = field(default_factory=list)
+    audit: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {"snapshot": self.snapshot.as_dict(), "ranking": self.ranking.as_dict(),
                 "n_transitions": len(self.transitions),
                 "n_gate_failures": len(self.gate_failures),
-                "n_sent": len(self.sent)}
+                "n_sent": len(self.sent),
+                "n_audited": len(self.audit.get("audited", []))}
 
 
 class Runtime:
@@ -113,7 +116,8 @@ class Runtime:
         return out
 
     # -- the cycle ----------------------------------------------------------
-    def cycle(self, mode: str, day: date, now: Optional[datetime] = None) -> CycleResult:
+    def cycle(self, mode: str, day: date, now: Optional[datetime] = None,
+              async_mode: bool = True) -> CycleResult:
         now = as_utc(now or now_utc())
         self._ensure_day(day)
 
@@ -133,6 +137,9 @@ class Runtime:
         # features -> gates -> score -> rank
         scored: list[Scored] = []
         gate_failures: dict[str, str] = {}
+        scored_by: dict[str, Scored] = {}
+        gates_by: dict[str, GateReport] = {}
+        features_by: dict[str, FeatureSet] = {}
         from .calendar_us import phase_age_minutes
         age = phase_age_minutes(now)
         for sym, rec in snap.records.items():
@@ -148,12 +155,20 @@ class Runtime:
                                       fs.as_dict(),
                                       "" if rep.passed else (rep.first_failure.reason
                                                              if rep.first_failure else ""))
+            gates_by[sym] = rep
+            features_by[sym] = fs
             if rep.passed:
-                scored.append(score_candidate(rec, fs, rep, self.cfg, mode))
+                sc = score_candidate(rec, fs, rep, self.cfg, mode)
+                scored.append(sc)
+                scored_by[sym] = sc
             else:
                 gate_failures[sym] = rep.summary()
 
         rk = rank(scored, self.cfg)
+
+        # methodology_v3 audit (§10): off the decision path, never gates an alert.
+        audit = self._audit_candidates(day, mode, now, rk, snap, scored_by,
+                                       gates_by, features_by, async_mode=True)
 
         # state machine
         prices = {s: snap.records[s].price for s in snap.records
@@ -177,13 +192,78 @@ class Runtime:
                 self._first_seen.setdefault(s.symbol, now)
 
         return CycleResult(snapshot=snap, ranking=rk, transitions=transitions,
-                           gate_failures=gate_failures, sent=sent)
+                           gate_failures=gate_failures, sent=sent, audit=audit)
 
     def _catalyst_score(self, symbol: str) -> Optional[float]:
         if not self.catalyst:
             return None
         items = getattr(self, "_catalyst_items", {}).get(symbol, [])
         return self.catalyst.best_score(symbol, items)
+
+    # -- methodology_v3 audit (§10) -----------------------------------------
+    def build_bundle_inputs(self, rec: Canonical, sc: Scored, rep: GateReport,
+                            fs: FeatureSet, mode: str, now: datetime,
+                            gate_passed: bool = True) -> BundleInputs:
+        """Translate ROTD's internal decision objects into the §4 fact bundle.
+
+        Code owns every number; the model only reads. Fields ROTD cannot yet
+        compute are passed ``None`` so the auditor sees an explicit ``null``.
+        """
+        rank_no = sc.rank if sc.rank is not None else 999
+        phase = _phase_from_mode(mode)
+        vwap = fs.value("vwap_dist")
+        vwap_state = None
+        if vwap is not None:
+            vwap_state = "ABOVE" if vwap > 0.5 else ("BELOW" if vwap < -0.5 else "AT")
+        return BundleInputs(
+            symbol=rec.symbol, company=rec.company, exchange="",
+            session=mode, time_et=fmt_ts(now),
+            price=rec.price, pct_vs_close=rec.change_pct,
+            rise_15m_pct=None, volx_15m=fs.value("rvol"),
+            dollar_vol_15m=fs.value("dollar_volume_15m"), day_volume=rec.volume,
+            rotation_ratio=None, vwap_state=vwap_state,
+            bid=rec.bid, ask=rec.ask, spread_pct=rec.spread_pct,
+            float_shares=rec.shares_float, short_pct_float=rec.short_float,
+            fuel_rating=_rating(fs.value("squeeze_flag"), rec.short_float),
+            phase=phase, gate_passed=gate_passed,
+            gate_blockers=[r.gate for r in rep.results if not r.passed],
+            rules_verdict="ARMED" if gate_passed else "REJECT",
+            levels=[], news={"status": "OK", "items": []},
+            filings={"status": "OK", "items": []},
+            context={"market": None, "sector_hot": None, "analogs": None,
+                     "multi_timeframe": None, "rank": rank_no},
+        )
+
+    def _audit_candidates(self, day: date, mode: str, now: datetime, rk: Ranking,
+                          snap: Snapshot, scored_by: dict[str, Scored],
+                          gates_by: dict[str, GateReport],
+                          features_by: dict[str, FeatureSet],
+                          async_mode: bool) -> dict[str, Any]:
+        """Audit the board-scale candidates (methodology_v3 §10).
+
+        Off the decision path: in live mode the call runs on a background thread
+        so a cycle never blocks. Without a model the result is the rules-only
+        block, and nothing here changes a verdict (the state machine owns it).
+        """
+        top_n = self.cfg.int("CATALYST_TOP_N_EARLY", 10)
+        audit_syms = [s.symbol for s in rk.day_ranked[:top_n]]
+        out: dict[str, Any] = {"audited": [], "verdicts": {}}
+        for sym in audit_syms:
+            rec = snap.records.get(sym)
+            sc = scored_by.get(sym)
+            rep = gates_by.get(sym)
+            fs = features_by.get(sym)
+            if not (rec and sc and rep and fs):
+                continue
+            inp = self.build_bundle_inputs(rec, sc, rep, fs, mode, now,
+                                           gate_passed=rep.passed)
+            if async_mode:
+                self.catalyst.audit_report_async(inp)
+            else:
+                res = self.catalyst.audit_report(inp)
+                out["verdicts"][sym] = res.report.verdict
+            out["audited"].append(sym)
+        return out
 
     def _dispatch(self, day: date, mode: str, now: datetime, rk: Ranking,
                   snap: Snapshot, transitions: list[Transition]) -> list[dict[str, Any]]:
@@ -247,3 +327,20 @@ def _is_half(mode: str, day: date) -> bool:
         return is_half_day(day)
     except Exception:  # noqa: BLE001
         return False
+
+
+def _phase_from_mode(mode: str) -> str:
+    """Map the session mode to the methodology_v3 phase label."""
+    return {"PRE": "PRE", "OPEN": "FRONT_SIDE", "MIDDAY": "MIDDAY",
+            "POST": "POST", "OVERNIGHT": "CLOSED"}.get(mode, "UNKNOWN")
+
+
+def _rating(squeeze: Optional[float], short_float: Optional[float]) -> Optional[str]:
+    """STRONG/MODERATE/WEAK from the squeeze signal + short float."""
+    sf = short_float if short_float is not None else 0.0
+    strong = (squeeze or 0.0) >= 1.0 or sf >= 20.0
+    if strong:
+        return "STRONG"
+    if sf >= 8.0:
+        return "MODERATE"
+    return "WEAK"

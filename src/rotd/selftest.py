@@ -105,6 +105,7 @@ def run(cfg: Config, verbose: bool = False) -> int:
         _notifier_check(cfg, results, step)
         _store_check(cfg, results, step)
         _auditor_checks(cfg, results, step)
+        _runtime_audit_check(cfg, results, step)
     except SelftestFailure as exc:
         print(f"FAIL: {exc}")
         _print(results)
@@ -316,6 +317,68 @@ def _auditor_checks(cfg: Config, results, step) -> None:
     _check(res.report.source == "rules", "auditor did not fall back to rules", results,
            "auditor: rules-only fallback")
     step("auditor: methodology_v3")
+
+
+def _runtime_audit_check(cfg: Config, results, step) -> None:
+    """The runtime must build a §4 bundle from live objects and audit it (§10)."""
+    import tempfile
+    from datetime import date
+    from .auditor import AuditorService, build_fact_bundle
+    from .catalyst import CatalystService
+    from .features import compute_features
+    from .gates import run_gates
+    from .normalize import Canonical, Snapshot
+    from .notifier import Notifier
+    from .runtime import Runtime, _phase_from_mode
+    from .scoring import rank, score_candidate
+    from .store import Store
+    from .telegram import FakeTelegram
+    from .util import now_utc
+
+    now = now_utc()
+    rec = Canonical(symbol="EXMP", price=2.31, prev_close=1.90, open=2.00,
+                    volume=3_000_000, volume_basis="SINGLE_VENUE", bid=2.30, ask=2.32,
+                    spread_pct=0.9, day_high=2.40, day_low=1.98, shares_float=4_000_000,
+                    short_float=22.0, company="Exemplar Inc", data_grade="A", fetched_at=now)
+    snap = Snapshot(trading_day=date(2026, 10, 13), mode="OPEN", cycle_ts=now,
+                    records={"EXMP": rec})
+    fs = compute_features(rec, cfg, snap, catalyst_score=None)
+    rep = run_gates(rec, fs, cfg, "OPEN", snap)
+    # G-LIQ needs an intra-cycle 15m dollar volume the synthetic record lacks, so
+    # the candidate may be gated out here; that is fine — the point is that the
+    # audit wiring builds a bundle for whatever the gate decided (§10).
+    sc = score_candidate(rec, fs, rep, cfg, "OPEN")
+    sc.rank = 1
+
+    # Windows keeps a handle on the SQLite file, so do not auto-delete the dir.
+    td = Path(tempfile.mkdtemp(prefix="rotd-selftest-"))
+    try:
+        store = Store(td / "rotd.db")
+        cat = CatalystService(cfg, store, auditor=AuditorService(cfg, caller=None))
+        rt = Runtime(cfg, store, {}, Notifier(cfg, FakeTelegram(cfg)), cat)
+        inp = rt.build_bundle_inputs(rec, sc, rep, fs, "OPEN", now,
+                                     gate_passed=rep.passed)
+        _check(inp.symbol == "EXMP" and inp.price == 2.31
+               and inp.gate_passed is rep.passed,
+               "bundle inputs built wrong", results, "runtime audit: bundle inputs")
+        bundle = build_fact_bundle(inp, cfg)
+        _check(bundle["meta"]["ticker"] == "EXMP" and bundle["tape"]["price"] == 2.31,
+               "fact bundle wrong from live objects", results,
+               "runtime audit: fact bundle from live objects")
+        # the audit runs (rules-only without a model) and never raises
+        res = rt._audit_candidates(date(2026, 10, 13), "OPEN", now,
+                                   rank([sc], cfg), snap, {"EXMP": sc},
+                                   {"EXMP": rep}, {"EXMP": fs}, async_mode=False)
+        _check("EXMP" in res["audited"] and "EXMP" in res["verdicts"],
+               "audit did not run for the candidate", results,
+               "runtime audit: audits the ranked candidate")
+        store.close()
+        step("runtime audit wiring")
+    finally:
+        import shutil
+        shutil.rmtree(td, ignore_errors=True)
+    _check(_phase_from_mode("OPEN") == "FRONT_SIDE", "phase map wrong", results,
+           "runtime audit: phase map")
 
 
 def _print(results) -> None:
