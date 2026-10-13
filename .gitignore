@@ -26,6 +26,8 @@ secrets.txt
 *.db-shm
 data/
 ~/.rotd/
+logs/
+*.log
 
 # --- OS / editor ---
 .DS_Store
