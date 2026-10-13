@@ -105,6 +105,7 @@ def run(cfg: Config, verbose: bool = False) -> int:
         _notifier_check(cfg, results, step)
         _store_check(cfg, results, step)
         _shadow_check(cfg, results, step)
+        _tracker_check(cfg, results, step)
         _auditor_checks(cfg, results, step)
         _runtime_audit_check(cfg, results, step)
     except SelftestFailure as exc:
@@ -298,6 +299,29 @@ def _store_check(cfg: Config, results, step) -> None:
                results, "store: miss report round-trip")
         st.close()
     step("store round-trips")
+
+
+def _tracker_check(cfg: Config, results, step) -> None:
+    """Path tracking must grade an alert +30% before -12% (§12.2)."""
+    from datetime import timedelta
+    from .tracker import PathTracker
+    from .util import now_utc
+    t0 = now_utc()
+    tr = PathTracker(alert_id=1, symbol="RUN", trading_day=date(2026, 10, 13),
+                     ref_price=2.00, ref_ts=t0)
+    # a +35% print resolves the gain leg first
+    tr.observe(2.70, t0 + timedelta(minutes=1), cfg)
+    _check(tr.hit_gain_first is True, "gain leg not resolved first", results,
+           "tracker: +gain before -stop resolves True")
+    _check(round(tr.max_gain_pct or 0, 1) == 35.0, "max gain wrong", results,
+           "tracker: max gain percent")
+    # a stop-first path resolves False
+    tr2 = PathTracker(alert_id=2, symbol="RUN", trading_day=date(2026, 10, 13),
+                      ref_price=2.00, ref_ts=t0)
+    tr2.observe(1.70, t0 + timedelta(minutes=1), cfg)
+    _check(tr2.hit_gain_first is False, "stop leg not resolved first", results,
+           "tracker: -stop before +gain resolves False")
+    step("tracking/grading")
 
 
 def _auditor_checks(cfg: Config, results, step) -> None:

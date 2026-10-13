@@ -183,6 +183,10 @@ class Runtime:
         n_ign = sum(1 for s in sent if s.get("kind") == "IGNITION")
         shadow.note_cycle(self.store, day, alerts=n_ign)
 
+        # tracking/grading (§12): feed this cycle's price into every live tracker so
+        # its checkpoints (+30% before -12%) resolve as the day unfolds.
+        self._observe_trackers(snap, now)
+
         # persist snapshot + decisions
         self.store.save_snapshot(day, mode, now, snap.data_grade, snap.quality,
                                  snap.payload_hash, len(snap.records))
@@ -204,6 +208,25 @@ class Runtime:
             return None
         items = getattr(self, "_catalyst_items", {}).get(symbol, [])
         return self.catalyst.best_score(symbol, items)
+
+    # -- tracking / grading (§12) -------------------------------------------
+    def _observe_trackers(self, snap: Snapshot, now: datetime) -> None:
+        """Feed a fresh price to every live tracker and persist resolved checkpoints."""
+        if not self.trackers:
+            return
+        for tr in list(self.trackers.values()):
+            rec = snap.records.get(tr.symbol)
+            price = rec.price if rec else None
+            if price is None:
+                continue
+            before = (tr.hit_gain_at, tr.hit_stop_at)
+            tr.observe(price, now, self.cfg)
+            # record the moment the +gain / -stop trip resolves the grade
+            if tr.hit_gain_at and tr.hit_gain_at != before[0]:
+                tr.mark("GAIN_HIT", price, now)
+            if tr.hit_stop_at and tr.hit_stop_at != before[1]:
+                tr.mark("STOP_HIT", price, now)
+            tr.persist(self.store)
 
     # -- methodology_v3 audit (§10) -----------------------------------------
     def build_bundle_inputs(self, rec: Canonical, sc: Scored, rep: GateReport,

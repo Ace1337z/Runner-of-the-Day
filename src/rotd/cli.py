@@ -234,6 +234,25 @@ def _run(cfg: Config, args: argparse.Namespace, live: bool) -> int:
     return 0
 
 
+def cmd_finalize(cfg: Config, args: argparse.Namespace) -> int:
+    """End of day: build the runner list and the MISS REPORT for a completed day."""
+    store = Store(cfg.db_path)
+    si = session_info()
+    try:
+        day = date.fromisoformat(args.date) if args.date else si.trading_day
+    except ValueError:
+        print(f"bad date: {args.date} (want YYYY-MM-DD)")
+        store.close()
+        return 2
+    rt, clients, tg = _build(cfg, store, use_fake_telegram=True)
+    report = rt.finalize_day(day)
+    from .notifier import render_miss_report
+    print(f"MISS REPORT for {day}:")
+    print(render_miss_report(report))
+    store.close()
+    return 0
+
+
 def cmd_replay(cfg: Config, args: argparse.Namespace) -> int:
     store = Store(cfg.db_path)
     try:
@@ -342,6 +361,10 @@ def build_parser() -> argparse.ArgumentParser:
     rp = sub.add_parser("replay", help="re-run a stored day")
     rp.add_argument("date")
     rp.set_defaults(func=cmd_replay)
+
+    fn = sub.add_parser("finalize", help="end of day: runner list + MISS REPORT")
+    fn.add_argument("date", nargs="?")
+    fn.set_defaults(func=cmd_finalize)
 
     ss = sub.add_parser("status", help="show current day, state, budget")
     ss.set_defaults(func=cmd_status)
