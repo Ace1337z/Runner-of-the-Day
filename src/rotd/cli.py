@@ -94,13 +94,19 @@ def cmd_doctor(cfg: Config, args: argparse.Namespace) -> int:
     out["checks"]["telegram"] = {"ok": ok, "message": msg,
                                  "as": "FakeTelegram" if isinstance(tg, FakeTelegram) else "live"}
     cat = CatalystService(cfg, store)
-    ok, msg = cat.health()
-    out["checks"]["catalyst"] = {"ok": ok, "message": msg}
-    # the shadow clock (§17 Phase 6): a live push is blocked until it completes
+    cok, cmsg = cat.health()
+    # No model configured is a *supported* deployment (rules-only verdicts), so it
+    # is a warning, not a failure: the auditor falls back to the rules-only block.
+    out["checks"]["catalyst"] = {"ok": True, "warn": not cok, "message": cmsg}
+    # the shadow clock (§17 Phase 6): a live push is blocked until it completes.
+    # An in-progress clock is the *expected* healthy state, so it is reported but
+    # never counted as a doctor failure — only a corrupt/unreadable clock is.
     from . import shadow
-    sst = shadow.status(store, cfg=cfg)
-    out["checks"]["shadow_clock"] = {"ok": (not sst.enabled) or sst.complete,
-                                     "message": sst.line(), **sst.as_dict()}
+    try:
+        sst = shadow.status(store, cfg=cfg)
+        out["checks"]["shadow_clock"] = {"ok": True, "message": sst.line(), **sst.as_dict()}
+    except Exception as exc:  # noqa: BLE001
+        out["checks"]["shadow_clock"] = {"ok": False, "message": str(exc)}
     # the methodology_v3 auditor prompt must load and carry its markers (§10)
     try:
         from .auditor import load_system_prompt
@@ -129,8 +135,13 @@ def cmd_doctor(cfg: Config, args: argparse.Namespace) -> int:
         print(f"  db:     {out['db']}")
         for name, c in out["checks"].items():
             if "ok" in c:
-                mark = "OK " if c["ok"] else "!! "
-                extra = {k: v for k, v in c.items() if k not in ("ok",)}
+                if not c["ok"]:
+                    mark = "!! "
+                elif c.get("warn"):
+                    mark = " ~ "
+                else:
+                    mark = "OK "
+                extra = {k: v for k, v in c.items() if k not in ("ok", "warn")}
                 print(f"  {mark}{name}: {extra}")
             else:
                 print(f"     {name}: {c}")
