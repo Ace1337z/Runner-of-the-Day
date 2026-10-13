@@ -25,13 +25,21 @@ Under construction. Built in phases (see `docs/RECON.md` and the build plan).
 At most `ALERT_BUDGET_PER_DAY` (3, +1 reserve) ignition alerts per trading day;
 zero alerts on a quiet day is a correct outcome.
 
+**Shadow mode is the default gate.** ROTD must run for a full **10-trading-day
+shadow clock** before a single live push is allowed. The clock counts actual NYSE
+sessions (weekends and holidays do not advance it), is stored in the database, and
+survives restarts. A live `rotd run` refuses to push until the clock completes.
+See `docs/DECISIONS.md` and the `shadow_clock` row in `rotd doctor`.
+
 ## Quickstart
 
 ```bash
 pip install -e .[dev]
-rotd doctor          # check config, sources, calendar, clock
+rotd doctor          # check config, sources, calendar, shadow clock
 rotd selftest        # offline self-test (no network)
 rotd shadow          # run every decision, push nothing
+rotd shadow-start    # start the 10-trading-day shadow clock
+rotd shadow-status   # how far the clock has come
 rotd replay DATE     # re-run a stored day through the same code
 ```
 

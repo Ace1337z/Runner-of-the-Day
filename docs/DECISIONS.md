@@ -39,6 +39,24 @@ bad response or a failed check. `CatalystService.audit_report` is the runtime
 entry point; the 0..100 `CatalystService.report_score` is the only number the
 Stage-1 scorer reads from it.
 
+## Shadow mode and the 10-trading-day clock (§17 Phase 6)
+
+No live push is allowed until ROTD has run in shadow for a full **10-trading-day**
+window. The clock is **calendar-bound**: it counts NYSE sessions via
+`exchange_calendars`, so weekends and holidays do not advance it. It is stored in
+the `meta` table (`shadow_start`, `shadow_last_seen`, `shadow_cycles`,
+`shadow_alerts`) and is therefore inspectable, restart-safe and testable without
+the network. `src/rotd/shadow.py` owns the logic; the length is the named setting
+`SHADOW_DAYS_REQUIRED` (unit: trading days, start: 10).
+
+The gate is enforced in `rotd run`: while the clock is incomplete it refuses to
+push (`SHADOW_INCOMPLETE`) and exits non-zero. `rotd shadow` always decides and
+logs but pushes nothing. `rotd doctor` and `rotd status` show the clock.
+
+**Clock started on 2026-10-13** (the A1 trading-day label in force when it was
+started). Ten sessions from there ends **2026-10-26**. Until then the system is
+shadow-only.
+
 ## Data-source reality (from VERIFIED.md §G)
 
 - **Finviz** = primary (universe, movers, quote rows, news, filings, extended-hours price).
