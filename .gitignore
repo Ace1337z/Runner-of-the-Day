@@ -35,3 +35,7 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+shadow*.txt
+shadow*.err
+st.txt
+st.err

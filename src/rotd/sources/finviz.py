@@ -14,6 +14,8 @@ Average Volume, Relative Volume, and the intraday Performance columns.
 
 from __future__ import annotations
 
+import csv
+import io
 import logging
 from typing import Any, Optional
 from urllib.parse import urlencode
@@ -69,8 +71,24 @@ DEFAULT_VIEW = "152"
 
 # Columns the ROTD quote shape needs, merged into every screener request so a
 # stale column list can never silently zero a field.
-REQUIRED_COLUMNS: tuple[int, ...] = (67, 68, 69, 71, 72, 81, 86, 87, 88,
-                                     26, 31, 65, 66, 90, 91, 92, 94)
+#
+# EVERY id below is verified against the live export — see VERIFIED.md G-17 for
+# the full id -> header table (probe: probes/probe_finviz_idmap.py). Do not hand-
+# edit an id without re-probing: id 1 is Ticker, and a wrong id silently returns
+# the wrong column (that is how the first cut zeroed the universe).
+#
+#  1 Ticker          2 Company         3 Sector        4 Industry
+#  6 Market Cap     24 Shares Out     25 Shares Float 30 Short Float
+# 31 Short Ratio    48 Beta           49 Average True Range
+# 59 RSI(14)        61 Gap            63 Average Volume  64 Relative Volume
+# 65 Price          66 Change         67 Volume          71 After-Hours Close
+# 72 After-Hours Change  81 Prev Close 86 Open           87 High
+# 88 Low            90 Perf(1m)       91 Perf(2m)       92 Perf(3m)
+# 94 Perf(10m)
+REQUIRED_COLUMNS: tuple[int, ...] = (1, 2, 3, 4,
+                                     6, 24, 25, 30, 31, 48, 49, 59, 61, 63, 64,
+                                     65, 66, 67, 71, 72, 81, 86, 87, 88,
+                                     90, 91, 92, 93, 94, 95, 97, 99)
 
 
 class FinvizTokenRejected(SourceError):
@@ -128,6 +146,14 @@ class FinvizClient(BaseClient):
         return text
 
     # -- endpoints ----------------------------------------------------------
+    # Headers `parse_row` reads; a screener response missing any of these means
+    # the requested `c=` id set is misaligned and every row would parse garbage
+    # (VERIFIED G-17). Assert, never silently accept.
+    REQUIRED_HEADERS: tuple[str, ...] = (
+        "Ticker", "Price", "Change", "Volume", "After-Hours Close",
+        "After-Hours Change", "Prev Close", "Open", "High", "Low",
+    )
+
     def screener(self, signal: str = "", columns: str = "", tickers: str = "",
                  timeframe: str = "") -> list[dict[str, str]]:
         """Screener export. ``signal`` is a friendly name or a raw Finviz code."""
@@ -141,7 +167,35 @@ class FinvizClient(BaseClient):
         view = "152"
         text = self._export("screener", s=code, c=merge_columns(columns),
                             v=view, t=tickers)
+        self._assert_columns(text)
         return parse_csv(text)
+
+    @classmethod
+    def _assert_columns(cls, text: str) -> None:
+        """Fail loud if the export is missing a required column (VERIFIED G-17).
+
+        The ``c=`` id set *replaces* the header, so a single wrong id drops a
+        column silently. An empty universe once hid here; a header check turns
+        that into an immediate, named error.
+        """
+        head = (text or "").lstrip("\ufeff").splitlines()[:1]
+        if not head:
+            return
+        try:
+            cols = next(csv.reader(io.StringIO(head[0])))
+        except Exception:  # noqa: BLE001
+            return
+        # Only audit a genuine multi-column CSV header. A single field means this
+        # is not a screener export (e.g. an error body); the caller's earlier
+        # HTML/status checks own that case.
+        if len(cols) < 2:
+            return
+        have = {c.strip() for c in cols}
+        missing = [h for h in cls.REQUIRED_HEADERS if h not in have]
+        if missing:
+            raise SourceError(
+                f"finviz: export missing required columns {missing} — the "
+                f"REQUIRED_COLUMNS id set is misaligned (see VERIFIED G-17)")
 
     def universe(self) -> list[dict[str, str]]:
         """Whole sub-$10 universe (no ``s=`` filter; price band applied downstream)."""

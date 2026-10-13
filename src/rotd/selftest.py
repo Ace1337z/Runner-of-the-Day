@@ -35,7 +35,7 @@ from .gates import run_gates
 from .notifier import render_ignition
 from .sources import (AlphaVantageClient, FinnhubClient, FinvizClient,
                       TwelveDataClient, YahooClient, parse_csv)
-from .sources.base import fixture_text, load_fixture
+from .sources.base import SourceError, fixture_text, load_fixture
 from .store import Store
 from .util import now_utc
 
@@ -74,6 +74,18 @@ def run(cfg: Config, verbose: bool = False) -> int:
         row0 = FinvizClient.parse_row(uni[0])
         _check("symbol" in row0 and "price" in row0, "bad finviz row", results,
                "fixtures: finviz row shape")
+        # the c= id set is verified (G-17); a wrong id silently zeroes the
+        # universe. Pin the identity ids and the export guard here.
+        from .sources.finviz import REQUIRED_COLUMNS
+        _check(1 in REQUIRED_COLUMNS and 2 in REQUIRED_COLUMNS,
+               "finviz ids missing Ticker/Company", results,
+               "finviz: c= id set includes Ticker (G-17)")
+        try:
+            FinvizClient._assert_columns('"Ticker","Price","Volume","Open"\n"X",1,2,3')
+            _check(False, "guard accepted a header with no Ticker", results,
+                   "finviz: export guard")
+        except SourceError:
+            _check(True, "", results, "finviz: export guard fails loud on a bad set")
         td = TwelveDataClient(cfg)
         q = json.loads(fixture_text("twelvedata_quote.txt"))
         _check("close" in q and "is_market_open" in q, "bad twelvedata quote", results,
