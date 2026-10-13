@@ -1,0 +1,11 @@
+# Normalize line endings across platforms.
+* text=auto
+
+# Fixtures must stay byte-stable for replay/determinism.
+src/rotd/sources/fixtures/** -text
+tests/fixtures/** -text
+
+*.sh text eol=lf
+*.md text eol=lf
+*.py text eol=lf
+*.toml text eol=lf

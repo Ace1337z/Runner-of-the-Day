@@ -1,0 +1,35 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# --- Secrets (NEVER commit) ---
+config.env
+*.env
+.env
+rotd.env
+secrets.txt
+*.secret
+
+# --- Runtime data ---
+*.db
+*.db-wal
+*.db-shm
+data/
+~/.rotd/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

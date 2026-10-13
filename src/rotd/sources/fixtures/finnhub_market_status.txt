@@ -1,0 +1,1 @@
+{"exchange":"US","holiday":null,"isOpen":false,"session":"post-market","t":1791929773,"timezone":"America/New_York"}

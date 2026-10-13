@@ -1,0 +1,1 @@
+{"code":403,"message":"Pre-market and post-market data are available on the Pro plan (individual) and the Venture plan (business) and above. To access this data, select the appropriate plan at https://twelvedata.com/pricing","status":"error"}
