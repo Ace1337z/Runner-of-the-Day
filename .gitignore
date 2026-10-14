@@ -41,3 +41,14 @@ st.txt
 st.err
 s3.txt
 s3.err
+
+# transient probe/debug outputs
+probes/_*.txt
+pt.txt
+pte.txt
+st.txt
+st.err
+s3.txt
+s3.err
+hist_out.txt
+doc_out.txt

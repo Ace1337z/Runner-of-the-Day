@@ -172,6 +172,51 @@ class TelegramClient:
         except Exception as exc:  # noqa: BLE001
             return False, scrub(str(exc), self._secrets)
 
+    def handle_command(self, text: str, sender_chat: str, cfg: "Config") -> Optional[str]:
+        """See :func:`handle_command` at module level; bound here for convenience."""
+        return handle_command(self, text, sender_chat, cfg)
+
+
+# Keys a user may set from Telegram after install (everything else stays at its
+# safe default in config.env). /setkey is the installer's "add keys later" path.
+SETTABLE_KEYS = (
+    "FINVIZ_TOKEN", "TWELVEDATA_KEY", "FINNHUB_KEY", "ALPHA_VANTAGE_KEY",
+    "ALPACA_KEY", "ALPACA_SECRET", "SEC_USER_AGENT",
+    "OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL",
+)
+
+
+def handle_command(self, text: str, sender_chat: str, cfg: "Config") -> Optional[str]:
+    """Process one inbound Telegram command from the configured chat.
+
+    Returns a human-readable reply string, or ``None`` if the message was not a
+    command for this bot. Commands are accepted only from ``TELEGRAM_CHAT_ID``
+    (the installer writes it). Unknown or denied keys are refused without writing.
+    """
+    if not text or not text.startswith("/"):
+        return None
+    if self.chat_id and str(sender_chat) != self.chat_id:
+        # Not the owner chat: ignore silently (don't leak a "denied" message).
+        return None
+    parts = text[1:].split()
+    name = parts[0].lower().split("@")[0]
+    if name == "setkey":
+        if len(parts) < 3:
+            return ("usage: /setkey KEY VALUE  — settable keys: "
+                    + ", ".join(SETTABLE_KEYS))
+        key, value = parts[1].upper(), " ".join(parts[2:])
+        if key not in SETTABLE_KEYS:
+            return f"refused: {key} is not a settable key"
+        try:
+            cfg.append_to_file(key, value)
+        except Exception as exc:  # noqa: BLE001
+            return f"error saving {key}: {scrub(str(exc), self._secrets)}"
+        return f"ok: {key} updated (applied on next cycle)"
+    if name in ("start", "help"):
+        return ("ROTD is watching the sub-$10 universe in shadow mode. "
+                "Add a key with: /setkey FINVIZ_TOKEN <token>")
+    return None
+
 
 def split_message(text: str, limit: int = MAX_MESSAGE) -> list[str]:
     """Split long messages on line boundaries."""
@@ -255,6 +300,15 @@ class FakeTelegram:
 
     def health(self) -> tuple[bool, str]:
         return True, "fake telegram (no network)"
+
+    @property
+    def chat_id(self) -> str:
+        return str(self.cfg.raw("TELEGRAM_CHAT_ID") if self.cfg else "")
+
+    def handle_command(self, text: str, sender_chat: str, cfg: "Config") -> Optional[str]:
+        # Record the command so tests can assert on it; no network side effects.
+        self.commands.append(text)
+        return handle_command(self, text, sender_chat, cfg)
 
     def text_of(self, msg_id: int) -> str:
         for m in self.messages:
