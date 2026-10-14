@@ -293,6 +293,7 @@ def cmd_listen(cfg: Config, args: argparse.Namespace) -> int:
     # Guards the worker-cycle so only one runs at a time (Store is locked, but we
     # avoid piling up cycles that would just contend on the DB).
     cycle_thread: Optional[threading.Thread] = None
+    last_trading_day: list[date] = [session_info().trading_day]
 
     def maybe_cycle() -> None:
         nonlocal cycle_thread
@@ -318,6 +319,9 @@ def cmd_listen(cfg: Config, args: argparse.Namespace) -> int:
         return 0
     try:
         while True:
+            # 0. finalize the previous trading day once it has closed (builds the
+            #    runner list + MISS REPORT and pushes it to Telegram).
+            _finalize_if_closed(rt, last_trading_day)
             # 1. answer commands first (no cycle in front of them)
             offset = _listen_reply(cfg, store, tg, offset, split)
             # 2. kick off the cycle on a worker thread
@@ -341,6 +345,44 @@ def _safe_cycle(rt: "Runtime", mode: str, day: "date") -> None:
         rt.cycle(mode, day)
     except Exception as exc:  # noqa: BLE001
         log.warning("listen: cycle failed: %s", exc)
+
+
+def _finalize_if_closed(rt: "Runtime", last_trading_day: "list[date]") -> None:
+    """Build + send the MISS REPORT once the previous trading day has closed.
+
+    The daemon never otherwise calls ``finalize_day``, so without this the runner
+    list and the daily MISS REPORT (the honest accounting of which sub-$10 names
+    ran and why ROTD did/didn't flag them) would never be built or pushed. We
+    finalize the day we were last trading on as soon as we observe a non-session
+    mode (CLOSED/OVERNIGHT boundary) or a new trading day, and only once per day.
+    """
+    si = session_info()
+    prev = last_trading_day[0] if last_trading_day else None
+    if prev is None:
+        last_trading_day[:] = [si.trading_day]
+        return
+    # A new trading day (or we're in a closed window) means the previous day is done.
+    day_ended = (si.trading_day != prev) or (not si.is_session)
+    if day_ended and store_day_closed(rt.store, prev):
+        try:
+            report = rt.finalize_day(prev)
+            n = len(report.get("runners", [])) if isinstance(report, dict) else 0
+            log.info("listen: finalized %s — %s runners, MISS REPORT sent",
+                     prev.isoformat(), n)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("listen: finalize failed for %s: %s", prev.isoformat(), exc)
+        last_trading_day[:] = [si.trading_day]
+    elif si.trading_day != prev:
+        last_trading_day[:] = [si.trading_day]
+
+
+def store_day_closed(store: "Store", day: "date") -> bool:
+    """True once we've recorded a POST-session snapshot / the day is marked closed."""
+    # Cheap heuristic: a miss report for the day already exists -> don't re-finalize.
+    existing = store.get_miss_report(day)
+    if existing:
+        return False
+    return True
 
 
 def _listen_reply(cfg, store, tg, offset, wait_s) -> int:

@@ -168,6 +168,12 @@ manual commands; `listen` is what the systemd unit runs.
 > commands are never blocked behind a cycle. Set `SHADOW_RUN_WHEN_CLOSED=0` to stop
 > running cycles outside NYSE sessions (commands are still answered instantly).
 
+> **Runner / MISS reporting:** the daemon auto-finalizes at end of day — it builds the
+> runner list and the daily MISS REPORT and pushes it to Telegram (no cron needed).
+> `/miss` reads it; `rotd finalize [YYYY-MM-DD]` rebuilds it on demand. A name that
+> "ran" but ROTD never alerted shows up in the MISS REPORT as a *missed* runner with
+> the reason it was gated (e.g. `G-DATA=STALE`), rather than being silently dropped.
+
 ```mermaid
 flowchart TD
     A[rotd listen daemon] -->|every LISTEN_POLL_S| B{reload config if changed}
@@ -238,7 +244,8 @@ Price now $3.21
 Price $3.42  (+6.2%)
 ```
 
-**MISS REPORT** (always produced, even on a zero-alert day; `/miss` to read it):
+**MISS REPORT** (always produced and pushed automatically at session close, even on
+a zero-alert day; `/miss` reads the latest one, `rotd finalize [YYYY-MM-DD]` rebuilds it):
 ```
 📊 ROTD MISS REPORT — 2026-10-14
 alerts 1  |  runners in list 3  |  caught 1  |  missed 2
@@ -263,7 +270,7 @@ installer writes it). Any other chat is ignored silently.
 | `/status` | Now, session mode, shadow clock, alert budget used |
 | `/board` | The latest ranked board (top candidates) |
 | `/runners` | Today's runner list (big movers) |
-| `/miss` | Today's MISS REPORT |
+| `/miss` | Today's MISS REPORT (auto-built at session close; the honest "which sub-$10 names ran and why ROTD did/didn't flag them") |
 | `/alerts` | Today's ignition alerts |
 | `/shadow` | The 10-trading-day shadow clock |
 | `/log` | Recent event log |
