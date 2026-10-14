@@ -1,0 +1,29 @@
+[Unit]
+Description=ROTD — Runner of the Day
+Documentation=https://github.com/Ace1337z/big-whale-penny-tracker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+Group=@USER@
+WorkingDirectory=@INSTALL_DIR@
+Environment=ROTD_HOME=@INSTALL_DIR@
+Environment=ROTD_CONFIG=@INSTALL_DIR@/config.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=@INSTALL_DIR@/.venv/bin/rotd --config @INSTALL_DIR@/config.env run
+Restart=always
+RestartSec=5
+# Keep the service alive across crashes and reboots.
+StartLimitIntervalSec=0
+
+# Modest hardening; the process needs outbound HTTPS only.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=@INSTALL_DIR@
+
+[Install]
+WantedBy=multi-user.target

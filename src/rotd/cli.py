@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from datetime import date
 from pathlib import Path
@@ -27,7 +28,7 @@ from typing import Any, Optional
 from . import __version__
 from .calendar_us import session_info
 from .catalyst import CatalystService
-from .config import Config
+from .config import Config, SECRET_KEYS
 from .notifier import Notifier
 from .runtime import Runtime
 from .sources import build_clients
@@ -317,6 +318,110 @@ def cmd_miss(cfg: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+# Keys the `setup` command writes; order matters (Telegram first, like penny).
+SETUP_ORDER = ["TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID"]
+SETUP_PROMPTS = {
+    "TELEGRAM_TOKEN": "Telegram bot token (@BotFather)",
+    "TELEGRAM_CHAT_ID": "Telegram chat id (or message the bot to auto-detect)",
+}
+
+
+def cmd_setup(cfg: Config, args: argparse.Namespace) -> int:
+    """Idempotent config writer, mirroring the penny-early-warning installer.
+
+    Interactive (a real tty): prompts only for Telegram, masked; pressing Enter
+    keeps the existing value. Non-interactive (env vars, or ``--non-interactive``):
+    reads every key from the environment and writes what is present. Secrets are
+    written chmod 600 and never echoed. All other keys can be set later from
+    Telegram via ``/setkey KEY VALUE``.
+    """
+    from .util import mask
+
+    cfg.ensure_exists()
+    print("ROTD setup")
+    print(f"configuration file: {cfg.path}")
+    if cfg.path.exists():
+        print("existing values are shown masked; press Enter to keep them.\n")
+
+    non_interactive = args.non_interactive or not sys.stdin.isatty()
+    if non_interactive:
+        print("non-interactive mode: reading values from the environment")
+        for key in SETUP_ORDER:
+            env = os.environ.get(key)
+            if env:
+                cfg.append_to_file(key, env)
+        print("configuration written from environment values (mode 600).")
+        _post_setup_checks(cfg, args)
+        return 0
+
+    for key in SETUP_ORDER:
+        prompt = SETUP_PROMPTS.get(key, key)
+        current = cfg.raw(key)
+        if key == "TELEGRAM_CHAT_ID" and not current:
+            value = _detect_chat_id(cfg)
+            if value:
+                cfg.append_to_file(key, value)
+                print(f"  {key} = {mask(value)} (auto-detected)")
+                continue
+        label = f"{prompt} [{mask(current) if current else 'empty'}]"
+        try:
+            import getpass
+            if key in SECRET_KEYS:
+                value = getpass.getpass(f"{label}: ")
+            else:
+                value = input(f"{label}: ")
+        except EOFError:
+            value = ""
+        if value:
+            cfg.append_to_file(key, value)
+
+    print(f"\nconfiguration written to {cfg.path} (mode 600)")
+    print("Every other key (Finviz, AI, SEC, ...) is optional and can be set later")
+    print("from Telegram: /setkey KEY VALUE.  'rotd config' lists what is set.")
+    _post_setup_checks(cfg, args)
+    return 0
+
+
+def _detect_chat_id(cfg: Config) -> Optional[str]:
+    token = cfg.raw("TELEGRAM_TOKEN")
+    if not token:
+        return None
+    print("\nSend any message to your Telegram bot now; waiting up to 60 seconds...")
+    client = TelegramClient(cfg, secrets=cfg.secret_values)
+    chat_id = client.detect_chat_id(attempts=30, timeout=2)
+    if chat_id:
+        print(f"detected chat id {chat_id}")
+    else:
+        print("could not detect the chat id; you can enter it manually")
+    return chat_id
+
+
+def _post_setup_checks(cfg: Config, args: argparse.Namespace) -> None:
+    if getattr(args, "skip_doctor", False):
+        return
+    print("\nrunning the offline self-test...")
+    from .selftest import run_selftest
+    report = run_selftest(cfg)
+    print(report.text())
+    if getattr(args, "doctor", False):
+        print("\nrunning the live checker (doctor)...")
+        try:
+            cmd_doctor(cfg, args)
+        except Exception as exc:  # noqa: BLE001
+            print(f"doctor reported: {exc}")
+
+
+def cmd_detect_chat(cfg: Config, args: argparse.Namespace) -> int:
+    """Detect the Telegram chat id by polling getUpdates after the user messages the bot."""
+    value = _detect_chat_id(cfg)
+    if value:
+        cfg.append_to_file("TELEGRAM_CHAT_ID", value)
+        print(f"TELEGRAM_CHAT_ID set to {value}")
+        return 0
+    print("no chat id detected; message the bot and retry, or set it manually.")
+    return 1
+
+
 def cmd_config(cfg: Config, args: argparse.Namespace) -> int:
     if args.key:
         if args.key not in {s.key for s in __import__("rotd.config", fromlist=["SETTINGS"]).SETTINGS}:
@@ -376,6 +481,18 @@ def build_parser() -> argparse.ArgumentParser:
     cf = sub.add_parser("config", help="show config (secrets masked)")
     cf.add_argument("key", nargs="?")
     cf.set_defaults(func=cmd_config)
+
+    sp = sub.add_parser("setup", help="write config (Telegram first; idempotent)")
+    sp.add_argument("--non-interactive", action="store_true",
+                    help="read values from the environment; do not prompt")
+    sp.add_argument("--skip-doctor", action="store_true",
+                    help="skip the self-test / doctor at the end")
+    sp.add_argument("--doctor", action="store_true",
+                    help="also run the live checker (doctor) after writing config")
+    sp.set_defaults(func=cmd_setup)
+
+    dc = sub.add_parser("detect-chat", help="auto-detect TELEGRAM_CHAT_ID from a bot message")
+    dc.set_defaults(func=cmd_detect_chat)
 
     p.add_argument("--version", action="version", version=f"rotd {__version__}")
     return p

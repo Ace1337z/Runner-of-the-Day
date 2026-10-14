@@ -172,6 +172,25 @@ class TelegramClient:
         except Exception as exc:  # noqa: BLE001
             return False, scrub(str(exc), self._secrets)
 
+    def detect_chat_id(self, attempts: int = 30, timeout: int = 2) -> Optional[str]:
+        """Installer helper: read the chat id once the user messages the bot.
+
+        Polls ``getUpdates`` for up to ``attempts`` rounds; returns the first
+        chat id seen, or ``None`` if nothing arrives. Mirrors the penny installer
+        flow so ``TELEGRAM_CHAT_ID`` can be auto-filled without manual entry.
+        """
+        if not self.token:
+            return None
+        offset = 0
+        for _ in range(attempts):
+            for upd in self.get_updates(offset=offset, timeout=timeout):
+                offset = max(offset, int(upd.get("update_id", 0)) + 1)
+                msg = upd.get("message") or upd.get("edited_message") or {}
+                chat = (msg.get("chat") or {}).get("id")
+                if chat is not None:
+                    return str(chat)
+        return None
+
     def handle_command(self, text: str, sender_chat: str, cfg: "Config") -> Optional[str]:
         """See :func:`handle_command` at module level; bound here for convenience."""
         return handle_command(self, text, sender_chat, cfg)
@@ -309,6 +328,10 @@ class FakeTelegram:
         # Record the command so tests can assert on it; no network side effects.
         self.commands.append(text)
         return handle_command(self, text, sender_chat, cfg)
+
+    def detect_chat_id(self, attempts: int = 30, timeout: int = 2) -> Optional[str]:
+        # No network: return whatever was configured, else None.
+        return str(self.cfg.raw("TELEGRAM_CHAT_ID") if self.cfg else "") or None
 
     def text_of(self, msg_id: int) -> str:
         for m in self.messages:

@@ -23,22 +23,28 @@ its data is inconsistent. ROTD fixes that structurally:
 
 ## Install
 
-One line. Clone, install, drop a safe default config, and ask **only** for your
-Telegram bot token + chat id:
+Mirrors the `penny-early-warning` installer. Download the script and run it
+**directly** (don't pipe it into bash — it needs to read your answers from the
+terminal):
 
 ```bash
-wget -O - https://raw.githubusercontent.com/Ace1337z/big-whale-penny-tracker/main/install.sh | bash
-# or:
-curl -fsSL https://raw.githubusercontent.com/Ace1337z/big-whale-penny-tracker/main/install.sh | bash
+wget -O install.sh https://raw.githubusercontent.com/Ace1337z/big-whale-penny-tracker/main/install.sh
+bash install.sh
 ```
 
-What the installer does:
-1. Clones the repo and runs `pip install -e .[dev]`.
-2. Copies `config.env.example` → `$HOME/.rotd/rotd.env` (mode 600, gitignored).
-3. Prompts **once** for `TELEGRAM_TOKEN` and `TELEGRAM_CHAT_ID` (from @BotFather).
-4. Runs `rotd doctor` so you can see the system is wired up.
+The installer (idempotent, 9 steps):
+1. **Credentials first** — asks **only** for your Telegram bot token + chat id
+   (hidden input; everything else is a safe default).
+2. Installs system packages (python3, venv, pip, wget, tar).
+3. Downloads the source tarball into `/opt/rotd`.
+4. Creates a venv and installs the package (`pip install -e .[dev]`).
+5. Writes `config.env` (mode 600) via `rotd setup --non-interactive`.
+6. Auto-detects the Telegram chat id (message the bot, or set it later).
+7. Installs + enables a `systemd` service (`deploy/rotd.service`).
+8. Runs the offline self-test and the live `doctor` check.
+9. Starts the service (`journalctl -u rotd -f` for logs).
 
-Every other API key defaults to empty (safe) and can be added **later, from
+Every other API key defaults to empty (safe) and is added **later, from
 Telegram itself** — from your configured chat, send:
 
 ```
@@ -55,9 +61,16 @@ anything else, and ignores messages from any chat but the configured
 `TELEGRAM_CHAT_ID`. Without any key ROTD still runs in shadow mode and the daily
 MISS REPORT lists every gate that was `NOT_ENFORCED` for lack of a feed.
 
-Secrets are never read from the command line and are redacted from logs. If you
-prefer a manual install: `pip install -e .[dev] && rotd doctor`
-(`python -m rotd.cli` works too if you don't install).
+**Non-interactive / headless** (CI, or to pre-seed keys):
+```bash
+ROTD_NONINTERACTIVE=1 TELEGRAM_TOKEN=... TELEGRAM_CHAT_ID=... \
+  ROTD_INSTALL_DIR=/opt/rotd bash install.sh
+```
+`ROTD_VERSION` (default `main`, or a tag) and `ROTD_URL` are also overridable.
+
+**Manual install** (no script): `pip install -e .[dev]`, then
+`rotd setup` (prompts for Telegram) or `rotd setup --non-interactive`.
+Secrets are never read from the command line and are redacted from logs.
 
 ## Status
 
@@ -75,6 +88,8 @@ See `docs/DECISIONS.md` and the `shadow_clock` row in `rotd doctor`.
 ```bash
 rotd doctor          # check config, sources, calendar, shadow clock
 rotd selftest        # offline self-test (no network)
+rotd setup           # write config (prompts for Telegram; idempotent)
+rotd detect-chat     # auto-fill TELEGRAM_CHAT_ID from a bot message
 rotd shadow-start    # start the 10-trading-day shadow clock
 rotd shadow          # run every decision, push nothing
 rotd shadow-status   # how far the clock has come
