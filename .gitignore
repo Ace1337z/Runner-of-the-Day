@@ -39,3 +39,5 @@ shadow*.txt
 shadow*.err
 st.txt
 st.err
+s3.txt
+s3.err

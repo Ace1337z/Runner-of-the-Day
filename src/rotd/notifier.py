@@ -131,6 +131,12 @@ def render_miss_report(report: dict[str, Any]) -> str:
         lines.append("Alerts that did not run:")
         for f in false_pos:
             lines.append(f"  · ${f['symbol']:<6} — {f.get('why', 'reversed')}")
+    not_enforced = report.get("not_enforced_gates", [])
+    if not_enforced:
+        lines.append("")
+        lines.append("Gates NOT ENFORCED today (no feed supplies their input — VERIFIED G-18):")
+        for g in not_enforced:
+            lines.append(f"  · {g}")
     if not (hits or misses or false_pos):
         lines.append("")
         lines.append("Quiet day: no sub-$10 names ran, and ROTD stayed silent. "

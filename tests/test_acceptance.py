@@ -102,9 +102,12 @@ def test_data_snapshot_grade_is_worst_record(cfg: Config):
     assert snap.data_grade == "F"
 
 
-# --- gates fail closed -----------------------------------------------------
+# --- gates fail closed (when enabled) / not-enforced (by default) ----------
 
-def test_gates_fail_closed_without_spread(cfg: Config):
+def test_gates_fail_closed_without_spread_when_enabled(cfg: Config):
+    # G-18: the spread gate is OFF by default (no book feed). When explicitly
+    # enabled it must still fail closed on a missing spread.
+    cfg._values["USE_SPREAD_GATE"] = "1"
     now = datetime(2026, 10, 13, 14, 0, tzinfo=UTC)
     rec = Canonical(symbol="X", price=2.0, prev_close=1.0, volume=1e6,
                     volume_basis="SINGLE_VENUE", data_grade="A", fetched_at=now)
@@ -113,6 +116,23 @@ def test_gates_fail_closed_without_spread(cfg: Config):
     rep = run_gates(rec, fs, cfg, "OPEN", snap)
     assert not rep.passed
     assert any(g.gate == "G-SPREAD" and not g.passed for g in rep.results)
+
+
+def test_spread_liquidity_exit_gates_not_enforced_by_default(cfg: Config):
+    # G-18: no configured source carries a bid/ask book or a 15m bar feed, so
+    # these three gates default OFF and report NOT_ENFORCED (pass) rather than
+    # silently zero the universe.
+    now = datetime(2026, 10, 13, 14, 0, tzinfo=UTC)
+    rec = Canonical(symbol="X", price=2.0, prev_close=1.0, volume=1e6,
+                    volume_basis="SINGLE_VENUE", data_grade="A", fetched_at=now)
+    snap = _snap([rec])
+    fs = compute_features(rec, cfg, snap)
+    rep = run_gates(rec, fs, cfg, "OPEN", snap)
+    by_gate = {g.gate: g for g in rep.results}
+    assert by_gate["G-SPREAD"].passed and by_gate["G-SPREAD"].reason == "SPREAD_NOT_ENFORCED"
+    assert by_gate["G-LIQ"].passed and by_gate["G-LIQ"].reason == "LIQUIDITY_NOT_ENFORCED"
+    assert by_gate["G-EXIT"].passed and by_gate["G-EXIT"].reason == "EXIT_NOT_ENFORCED"
+    assert rep.passed
 
 
 def test_gates_reject_above_price_ceiling(cfg: Config):

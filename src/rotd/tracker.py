@@ -151,11 +151,19 @@ def build_runner_list(records: list[Canonical], cfg: Config,
 
 def build_miss_report(store: Store, day: date, runners: list[Runner],
                       alerts: list[Any], data_grades: list[str],
-                      in_universe: Optional[set[str]] = None) -> dict[str, Any]:
+                      in_universe: Optional[set[str]] = None,
+                      cfg: Any = None) -> dict[str, Any]:
     """Assemble the daily MISS REPORT (§12.4). Always produced.
 
     For every runner the day produced it explains why ROTD did or did not flag it.
+    Also surfaces any gates that are OFF by default (VERIFIED G-18) so the day's
+    blind spots are called out explicitly rather than hidden.
     """
+    try:
+        from .gates import gates_not_enforced
+        not_enforced = gates_not_enforced(cfg) if cfg is not None else []
+    except Exception:  # noqa: BLE001
+        not_enforced = []
     universe = in_universe or set()
     alerted = {a["symbol"] for a in alerts}
     hits: list[dict[str, Any]] = []
@@ -217,5 +225,6 @@ def build_miss_report(store: Store, day: date, runners: list[Runner],
         "hits": hits,
         "misses": missed,
         "false_positive": false_positive,
+        "not_enforced_gates": not_enforced,
         "s1_quiet_when_quiet": len(alerts) == 0 and len(runners) == 0,
     }

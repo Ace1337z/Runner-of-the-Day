@@ -178,18 +178,36 @@ def _gate_checks(cfg: Config, results, step) -> None:
     from .normalize import Canonical, Snapshot
     from .util import now_utc
     now = now_utc()
-    # A record with no spread must fail G-SPREAD (fail closed).
-    rec = Canonical(symbol="X", price=2.0, prev_close=1.0, volume=1e6, volume_basis="SINGLE_VENUE",
-                    data_grade="A", fetched_at=now)
-    for r in cfg.raw("SPREAD_TIERS").split(","):
-        pass
-    snap = Snapshot(trading_day=now.date(), mode="PRE", cycle_ts=now, records={"X": rec})
-    fs = F.compute_features(rec, cfg, snap)
-    rep = run_gates(rec, fs, cfg, "PRE", snap)
-    _check(not rep.passed, "no-spread record passed gates", results,
-           "gates fail closed on missing spread")
-    _check(any(g.gate == "G-SPREAD" and not g.passed for g in rep.results),
-           "G-SPREAD did not fail", results, "G-SPREAD fails without bid/ask")
+    snap = Snapshot(trading_day=now.date(), mode="PRE", cycle_ts=now, records={})
+
+    # G-18: by default the spread/liquidity/exit gates are OFF (no book feed),
+    # so a no-spread record must NOT be blocked by them; they report NOT_ENFORCED.
+    rec_ne = Canonical(symbol="X", price=2.0, prev_close=1.0, volume=1e6,
+                       volume_basis="SINGLE_VENUE", data_grade="A", fetched_at=now)
+    fs_ne = F.compute_features(rec_ne, cfg, snap)
+    rep_ne = run_gates(rec_ne, fs_ne, cfg, "PRE", snap)
+    by = {g.gate: g for g in rep_ne.results}
+    _check(by["G-SPREAD"].passed and by["G-SPREAD"].reason == "SPREAD_NOT_ENFORCED",
+           "spread gate default not NOT_ENFORCED", results,
+           "G-SPREAD default = NOT_ENFORCED (G-18)")
+    _check(by["G-LIQ"].passed and by["G-LIQ"].reason == "LIQUIDITY_NOT_ENFORCED",
+           "liq gate default not NOT_ENFORCED", results,
+           "G-LIQ default = NOT_ENFORCED (G-18)")
+    _check(by["G-EXIT"].passed and by["G-EXIT"].reason == "EXIT_NOT_ENFORCED",
+           "exit gate default not NOT_ENFORCED", results,
+           "G-EXIT default = NOT_ENFORCED (G-18)")
+
+    # When USE_SPREAD_GATE=1 the same record must fail closed on the missing spread.
+    cfg._values["USE_SPREAD_GATE"] = "1"
+    try:
+        rep_on = run_gates(rec_ne, fs_ne, cfg, "PRE", snap)
+    finally:
+        cfg._values.pop("USE_SPREAD_GATE", None)
+    _check(not rep_on.passed, "no-spread record passed gates when enabled", results,
+           "G-SPREAD fails closed when enabled")
+    _check(any(g.gate == "G-SPREAD" and not g.passed for g in rep_on.results),
+           "G-SPREAD did not fail when enabled", results,
+           "G-SPREAD fails without bid/ask when enabled")
     step("gates fail closed")
 
 

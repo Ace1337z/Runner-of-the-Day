@@ -9,13 +9,19 @@ Gates:
 
 - ``G-PRICE``   — sub-$10 (``MAX_PRICE``); no price floor (§18.1).
 - ``G-SPREAD``  — quoted spread within the price-tier limit
-  (``SPREAD_TIERS``), loosened by ``EXT_SPREAD_MULT`` in POST/PRE.
+  (``SPREAD_TIERS``), loosened by ``EXT_SPREAD_MULT`` in POST/PRE. **OFF by
+  default** (``USE_SPREAD_GATE=0``): VERIFIED G-18 shows no source carries a
+  bid/ask book, so it reports ``SPREAD_NOT_ENFORCED`` instead of failing closed.
 - ``G-LIQ``     — 15-minute dollar volume >= the mode floor (``LIQ_15M_*``).
+  **OFF by default** (``USE_LIQ_GATE=0``): needs a 1-min bar feed this
+  deployment lacks; reports ``LIQUIDITY_NOT_ENFORCED``.
 - ``G-TRADES``  — enough prints at a sane average size; skipped when the feed
   cannot supply prints (``MIN_TRADES_15M=0`` means "not enforced", but the gate
-  then reports ``NOT_ENFORCED`` so the MISS REPORT can say so).
+  then reports ``TRADES_NOT_ENFORCED`` so the MISS REPORT can say so).
 - ``G-EXIT``    — a test exit of ``EXIT_TEST_USD`` would fill within
-  ``EXIT_MAX_SEC`` and ``EXIT_MAX_SLIP_PCT``.
+  ``EXIT_MAX_SEC`` and ``EXIT_MAX_SLIP_PCT``. **OFF by default**
+  (``USE_EXIT_GATE=0``): needs a spread/slippage estimate (a book) this
+  deployment lacks; reports ``EXIT_NOT_ENFORCED``.
 - ``G-HALT``    — no confirmed halt. With no halt feed (VERIFY D-5) this relies on
   staleness: a stale/absent quote already fails G-DATA, so G-HALT reports
   ``HALT_UNKNOWN`` and defers to G-DATA.
@@ -47,6 +53,9 @@ F_LIQ_LOW = "LIQUIDITY_LOW"
 F_LIQ_UNKNOWN = "LIQUIDITY_UNKNOWN"
 F_TRADES_LOW = "TRADES_LOW"
 G_TRADES_NOT_ENFORCED = "TRADES_NOT_ENFORCED"
+G_SPREAD_NOT_ENFORCED = "SPREAD_NOT_ENFORCED"
+G_LIQ_NOT_ENFORCED = "LIQUIDITY_NOT_ENFORCED"
+G_EXIT_NOT_ENFORCED = "EXIT_NOT_ENFORCED"
 F_EXIT_FAIL = "EXIT_TEST_FAILED"
 F_EXIT_UNKNOWN = "EXIT_UNKNOWN"
 F_HALT = "HALTED_SUSPENDED"
@@ -128,13 +137,19 @@ def gate_price(rec: Canonical, cfg: Config) -> GateResult:
 
 
 def gate_spread(rec: Canonical, cfg: Config, mode: str) -> GateResult:
+    # VERIFIED G-18: no configured source carries a bid/ask book, so the spread
+    # input is structurally unavailable. When the gate is off it is NOT_ENFORCED
+    # (passes, like G-TRADES) and the MISS REPORT lists it. Enable USE_SPREAD_GATE
+    # the moment a book feed exists (e.g. Alpaca unblocked).
+    if not cfg.bool("USE_SPREAD_GATE"):
+        return GateResult("G-SPREAD", True, G_SPREAD_NOT_ENFORCED,
+                          "no bid/ask feed; gate not enforced (VERIFIED G-18)")
     if rec.price is None:
         return GateResult("G-SPREAD", False, F_PRICE_UNKNOWN)
     limit = _spread_limit(rec.price, cfg, mode)
     if limit is None:
         return GateResult("G-SPREAD", False, F_SPREAD_UNKNOWN)
     if rec.spread_pct is None:
-        # No bid/ask on the feed: fail closed (cannot confirm an exit is cheap).
         return GateResult("G-SPREAD", False, F_SPREAD_UNKNOWN,
                           "no bid/ask; cannot confirm tradability")
     if rec.spread_pct > limit:
@@ -144,6 +159,13 @@ def gate_spread(rec: Canonical, cfg: Config, mode: str) -> GateResult:
 
 
 def gate_liquidity(fs: FeatureSet, cfg: Config, mode: str) -> GateResult:
+    # VERIFIED G-18: 15-min dollar volume needs a 1-min bar feed (TwelveData
+    # prepost is 403 here), which this deployment does not have. When off the
+    # gate is NOT_ENFORCED (passes) and the MISS REPORT lists it. Enable
+    # USE_LIQ_GATE once a bar feed supplies dollar_volume_15m.
+    if not cfg.bool("USE_LIQ_GATE"):
+        return GateResult("G-LIQ", True, G_LIQ_NOT_ENFORCED,
+                          "no 15m bar feed; gate not enforced (VERIFIED G-18)")
     floor_key = {"POST": "LIQ_15M_POST", "PRE": "LIQ_15M_PRE", "OPEN": "LIQ_15M_OPEN",
                  "MIDDAY": "LIQ_15M_MIDDAY", "OVERNIGHT": "LIQ_15M_POST"}.get(mode, "LIQ_15M_MIDDAY")
     floor = cfg.float(floor_key, 75000.0)
@@ -171,9 +193,14 @@ def gate_trades(fs: FeatureSet, cfg: Config) -> GateResult:
 def gate_exit(rec: Canonical, fs: FeatureSet, cfg: Config, mode: str) -> GateResult:
     """Test exit: is a plausible exit cheap enough to survive?
 
-    Without a level-2/print feed we approximate the exit test from the spread and
-    the 15m dollar volume, and fail closed when either is unknown.
+    VERIFIED G-18: the exit test needs a spread/slippage estimate, which needs a
+    bid/ask book this deployment does not have. When off the gate is
+    NOT_ENFORCED (passes) and the MISS REPORT lists it. Enable USE_EXIT_GATE
+    once a book feed exists (e.g. Alpaca unblocked).
     """
+    if not cfg.bool("USE_EXIT_GATE"):
+        return GateResult("G-EXIT", True, G_EXIT_NOT_ENFORCED,
+                          "no bid/ask feed; gate not enforced (VERIFIED G-18)")
     if rec.spread_pct is None:
         return GateResult("G-EXIT", False, F_EXIT_UNKNOWN, "no spread for the exit test")
     slip_limit = cfg.float("EXIT_MAX_SLIP_PCT", 2.0)
@@ -211,6 +238,18 @@ def gate_data(rec: Canonical, cfg: Config) -> GateResult:
     if rec.data_grade in ("F",):
         return GateResult("G-DATA", False, F_DATA, f"grade {rec.data_grade}")
     return GateResult("G-DATA", True, P_OK, f"grade {rec.data_grade}")
+
+
+def gates_not_enforced(cfg: Config) -> list[str]:
+    """Gate names currently OFF by default (no feed supplies their input).\n\n    Surfaced in the MISS REPORT so the daily post-mortem honestly lists the\n    system's blind spots (VERIFIED G-18). When a book/15m feed is added, set\n    the matching ``USE_*_GATE`` flag and the gate stops appearing here.\n    """
+    out = []
+    if not cfg.bool("USE_SPREAD_GATE"):
+        out.append("G-SPREAD (needs a bid/ask book)")
+    if not cfg.bool("USE_LIQ_GATE"):
+        out.append("G-LIQ (needs a 15-min bar feed)")
+    if not cfg.bool("USE_EXIT_GATE"):
+        out.append("G-EXIT (needs a bid/ask book)")
+    return out
 
 
 def run_gates(rec: Canonical, fs: FeatureSet, cfg: Config, mode: str,

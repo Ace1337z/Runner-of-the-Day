@@ -86,6 +86,17 @@ _GLOBAL: list[Setting] = [
     Setting("EXIT_MAX_SLIP_PCT", "2.0", "%", "A test exit must fill within this slippage (G-EXIT)."),
     Setting("SPREAD_TIERS", "1.00:1.5,0.50:3,0.20:5,0.05:8,0.00:12", "price:max spread %",
             "Max spread by price tier, loosest at the bottom (G-SPREAD)."),
+    # Gate enable flags. Each gate below needs a feed this deployment does NOT
+    # have (VERIFIED G-18): no source carries a bid/ask book or a 15-min print
+    # count, so the gates are OFF by default and report NOT_ENFORCED rather than
+    # fail-closed on data the system structurally cannot obtain. Turn one on the
+    # moment a feed supplies its input (e.g. Alpaca unblocked for the book).
+    Setting("USE_SPREAD_GATE", "0", "bool",
+            "G-SPREAD needs a bid/ask book; no source has one (VERIFIED G-18). 0 = not enforced."),
+    Setting("USE_LIQ_GATE", "0", "bool",
+            "G-LIQ needs 15-min dollar volume; needs a 1-min bar feed (VERIFIED G-18). 0 = not enforced."),
+    Setting("USE_EXIT_GATE", "0", "bool",
+            "G-EXIT needs a spread/slippage estimate; needs a book (VERIFIED G-18). 0 = not enforced."),
 
     # --- scoring weights (section 9.1) ---
     Setting("W_TAPE", "30", "points", "Tape-ignition weight (Stage-1 score)."),

@@ -343,7 +343,7 @@ class Runtime:
         alerts = self.store.alerts_for_day(day, kind="IGNITION")
         from .tracker import build_miss_report
         report = build_miss_report(self.store, day, runners, alerts, self._data_grades,
-                                   in_universe=self._universe)
+                                   in_universe=self._universe, cfg=self.cfg)
         self.store.save_miss_report(day, report)
         self.notifier.miss_report(report)
         return report
