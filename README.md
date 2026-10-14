@@ -56,6 +56,12 @@ Telegram itself** — from your configured chat, send:
 /setkey ALPACA_SECRET <secret>
 ```
 
+> **⚠️ Set `FINVIZ_TOKEN` immediately after install.** It is the primary feed and
+> the **only** source of the sub-$10 universe. Until it is set, ROTD pulls nothing,
+> scans return **zero candidates**, and the data grade is **F** — that is expected,
+> not a bug. (`/keys` shows what is set; the `doctor` check flags
+> `source:finviz: FINVIZ_TOKEN is not set`.) Every other key is optional.
+
 `/setkey` writes only allowlisted keys to the config file (mode 600), refuses
 anything else, and ignores messages from any chat but the configured
 `TELEGRAM_CHAT_ID`. Without any key ROTD still runs in shadow mode and the daily

@@ -9,6 +9,7 @@ TwelveData is NOT an extended-hours source. Fields verified against
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -25,6 +26,7 @@ class TwelveDataClient(BaseClient):
 
     def __init__(self, cfg, rate: Optional[tuple[int, float]] = (8, 60.0)):
         super().__init__(cfg, secrets=[cfg.raw("TWELVEDATA_KEY")], rate=rate)
+        self._last_quote_at = 0.0  # monotonic time of the last quote request
 
     def _key(self) -> str:
         key = self.cfg.raw("TWELVEDATA_KEY")
@@ -41,11 +43,27 @@ class TwelveDataClient(BaseClient):
 
     # -- endpoints ----------------------------------------------------------
     def quote(self, symbol: str) -> dict[str, Any]:
-        data = self._get("/quote", symbol=symbol.upper())
+        """Freshness quote, cached per symbol and spaced to fit the free-tier budget.
+
+        A cache hit costs no credit. A miss inside ``TWELVEDATA_MIN_INTERVAL_S`` of the
+        previous request raises ``SourceError`` (fail soft: the caller keeps the
+        Finviz price) instead of bursting into a 429.
+        """
+        sym = symbol.upper()
+        ttl = float(self.cfg.float("QUOTE_CACHE_TTL_S", 60))
+        cached = self._cache.get(f"q:{sym}", ttl)
+        if cached is not None:
+            return cached
+        min_gap = float(self.cfg.float("TWELVEDATA_MIN_INTERVAL_S", 8))
+        since = time.monotonic() - self._last_quote_at
+        if since < min_gap:
+            raise SourceError(f"twelvedata: throttled locally (next quote in {min_gap - since:.0f}s)")
+        self._last_quote_at = time.monotonic()
+        data = self._get("/quote", symbol=sym)
         if not isinstance(data, dict) or "close" not in data:
             raise SourceError(f"twelvedata: no quote for {symbol}")
         ts = data.get("timestamp")
-        return {
+        out = {
             "symbol": (data.get("symbol") or symbol).upper(),
             "price": fnum(data.get("close")),
             "open": fnum(data.get("open")),
@@ -61,6 +79,8 @@ class TwelveDataClient(BaseClient):
             "ts": datetime.fromtimestamp(int(ts), tz=UTC) if ts else None,
             "fetched_at": datetime.now(UTC),
         }
+        self._cache.set(f"q:{sym}", out)
+        return out
 
     def time_series(self, symbol: str, interval: str = "1min",
                     outputsize: int = 60) -> list[dict[str, Any]]:

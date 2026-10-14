@@ -153,6 +153,9 @@ class BaseClient:
         self._api_calls = 0
         self._lock = threading.Lock()
         self._limiter = RateLimiter(*rate) if rate else None
+        self._cooldown_until = 0.0
+        self._cooldown_lock = threading.Lock()
+        self._last_429_log = 0.0
 
     @property
     def secrets(self) -> list[str]:
@@ -179,8 +182,18 @@ class BaseClient:
             self._api_calls = 0
 
     def _request(self, method: str, url: str, accept: str = "", **kwargs):
+        now = time.monotonic()
+        with self._cooldown_lock:
+            remaining = self._cooldown_until - now
+        if remaining > 0:
+            raise SourceError(f"{self.name}: rate limited (HTTP 429; retry in {remaining:.0f}s)")
         if self._limiter is not None:
             self._limiter.acquire()
+        # A concurrent request may have triggered a 429 while we waited.
+        with self._cooldown_lock:
+            remaining = self._cooldown_until - time.monotonic()
+        if remaining > 0:
+            raise SourceError(f"{self.name}: rate limited (HTTP 429; retry in {remaining:.0f}s)")
         self.count_call()
         headers = dict(kwargs.pop("headers", {}) or {})
         if accept:
@@ -190,6 +203,20 @@ class BaseClient:
             resp = self.session().request(method, url, headers=headers, **kwargs)
         except Exception as exc:  # noqa: BLE001 - network failure is data absence
             raise SourceError(self.error_text(exc)) from exc
+        if resp.status_code == 429:
+            # Do not retry synchronously or sleep inside a cycle. Retry-After is
+            # sometimes absent/invalid; fall back to the named source cooldown.
+            try:
+                delay = max(1.0, float(resp.headers.get("Retry-After", "")))
+            except (ValueError, TypeError, AttributeError):
+                delay = float(self.cfg.float("SOURCE_COOLDOWN_S", 60))
+            with self._cooldown_lock:
+                self._cooldown_until = max(self._cooldown_until, time.monotonic() + delay)
+                if time.monotonic() - self._last_429_log >= delay:
+                    log.warning("%s: HTTP 429; backing off %.0fs (other sources remain available)",
+                                self.name, delay)
+                    self._last_429_log = time.monotonic()
+            raise SourceError(f"{self.name}: rate limited (HTTP 429; retry in {delay:.0f}s)")
         return resp
 
     def get_text(self, url: str, encoding: str = "utf-8", **kwargs) -> str:

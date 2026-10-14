@@ -168,6 +168,14 @@ if [[ -z "${TELEGRAM_CHAT_ID:-}" && "$HAS_TTY" == "1" ]]; then
         warn "could not auto-detect; set it later with: rotd setkey TELEGRAM_CHAT_ID <id>"
 fi
 echo
+if [[ -n "$FINVIZ_TOKEN" ]]; then
+    info "FINVIZ_TOKEN is set — universe pulls will use it. All other keys optional."
+else
+    info "Note: FINVIZ_TOKEN was NOT set. Without it the system cannot pull the"
+    info "sub-\$10 universe, so early scans return zero candidates and data grade"
+    info "drops to F — set it right away from the chat:  /setkey FINVIZ_TOKEN <token>"
+fi
+echo
 info "From the chat you can set anything else at any time, e.g.:"
 echo "  /keys                     show what is set and what is missing"
 echo "  /setkey FINVIZ_TOKEN <token>   set a key (secrets are saved, not echoed)"

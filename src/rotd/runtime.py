@@ -33,6 +33,7 @@ from .scoring import Ranking, Scored, rank, score_candidate
 from . import shadow
 from .state_machine import StateMachine, State, Transition
 from .store import Store
+from .sources.base import SourceError
 from .tracker import PathTracker, Runner, build_runner_list
 from .util import as_utc, fmt_ts, now_utc
 
@@ -73,6 +74,7 @@ class Runtime:
         self._first_seen: dict[str, datetime] = {}
         self._universe: set[str] = set()
         self._data_grades: list[str] = []
+        self._fresh_cursor = 0  # rotates the TwelveData freshness quote across the board
 
     def _ensure_day(self, day: date) -> None:
         if self._day != day:
@@ -99,22 +101,42 @@ class Runtime:
             return [], {"finviz": {"ok": False, "error": str(exc)[:120]}}
 
     def _fresh_points(self, symbols: list[str], now: datetime) -> dict[str, list[PricePoint]]:
-        """A fresher quote for tracked symbols, if a feed is available."""
+        """A fresher quote for tracked symbols, if a feed is available.
+
+        Rate-aware: at most the cached-or-one-new quote per cycle, rotating through the
+        board so every name is refreshed over time. Failures (429, cooldown, local
+        throttle) fall back silently to the Finviz price — logged once per cooldown.
+        """
         td = self.clients.get("twelvedata")
         if td is None or not self.cfg.raw("TWELVEDATA_KEY"):
             return {}
         out: dict[str, list[PricePoint]] = {}
-        # Only the board-scale symbols need a fresher quote; keep the call count low.
-        for sym in symbols[:self.cfg.int("BOARD_SIZE", 5) * 4]:
+        pool = symbols[:self.cfg.int("BOARD_SIZE", 5) * 4]
+        if not pool:
+            return out
+        start = self._fresh_cursor % len(pool)
+        ordered = pool[start:] + pool[:start]
+        self._fresh_cursor += 1
+        for sym in ordered:
+            before = td.api_calls
             try:
-                q = td.quote(sym)
-                out[sym] = [PricePoint(source="twelvedata", price=q.get("price"),
-                                       ts=q.get("ts") or now,
-                                       scope="UNKNOWN", volume=q.get("volume"),
-                                       prev_close=q.get("prev_close"))]
-            except Exception:  # noqa: BLE001 - a missing fresh quote is fine
+                q = td.quote(sym)  # cache hit is free; a fresh fetch is paced
+            except SourceError as exc:
+                msg = str(exc)
+                if "throttled" in msg or "429" in msg or "cooldown" in msg:
+                    break  # budget spent this cycle; the rotation resumes next cycle
+                continue  # a missing quote for one symbol is fine
+            except Exception:  # noqa: BLE001
                 continue
+            out[sym] = [PricePoint(source="twelvedata", price=q.get("price"),
+                                   ts=q.get("ts") or now,
+                                   scope="UNKNOWN", volume=q.get("volume"),
+                                   prev_close=q.get("prev_close"))]
+            # One fresh (uncached) fetch per cycle is enough to respect the budget.
+            if td.api_calls > before:
+                break
         return out
+
 
     # -- the cycle ----------------------------------------------------------
     def cycle(self, mode: str, day: date, now: Optional[datetime] = None,

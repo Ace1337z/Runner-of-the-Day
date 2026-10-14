@@ -157,6 +157,11 @@ _GLOBAL: list[Setting] = [
     Setting("DILUTION_BAND_MEDIUM", "35", "score", "dilution_score at/above this is band MEDIUM."),
     Setting("PROMO_AMPLIFY_PCT", "0", "%", "Reserved: promoter-amplification threshold; 0 = disabled."),
 
+    # --- source rate limits / caching (§4.4, doctor 429 fix) ---
+    Setting("QUOTE_CACHE_TTL_S", "60", "s", "Reuse a successful per-symbol quote within this window instead of re-fetching."),
+    Setting("TWELVEDATA_MIN_INTERVAL_S", "8", "s", "Minimum spacing between TwelveData quote requests (~7.5/min, within the free-tier 8-credit/min budget)."),
+    Setting("SOURCE_COOLDOWN_S", "60", "s", "After an HTTP 429 a source is put on cooldown for this long before its next call."),
+
     # --- discovery (section 6) ---
     Setting("CARRY_LOOKBACK_D", "90", "days", "Carry-list 'recent runner history' window (§6.4)."),
     Setting("SYMPATHY_ENABLED", "0", "bool", "Sympathy adds off until the sector join is proven (§6.5)."),
