@@ -13,7 +13,8 @@ import logging
 import time
 from typing import Any, Iterable, Optional
 
-from .util import scrub
+from .util import scrub, fmt_ts, now_utc
+from .calendar_us import session_info
 
 log = logging.getLogger(__name__)
 
@@ -191,9 +192,10 @@ class TelegramClient:
                     return str(chat)
         return None
 
-    def handle_command(self, text: str, sender_chat: str, cfg: "Config") -> Optional[str]:
+    def handle_command(self, text: str, sender_chat: str, cfg: "Config",
+                       ctx: Optional[dict] = None) -> Optional[str]:
         """See :func:`handle_command` at module level; bound here for convenience."""
-        return handle_command(self, text, sender_chat, cfg)
+        return handle_command(self, text, sender_chat, cfg, ctx)
 
 
 # Keys a user may set from Telegram after install (everything else stays at its
@@ -204,13 +206,37 @@ SETTABLE_KEYS = (
     "OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL",
 )
 
+# Every command the bot understands. Owner-chat only. `setkey`/`start`/`help`
+# work without a DB; the data commands take an optional context with the store.
+COMMANDS = (
+    ("/start", "wake the bot and show the command menu"),
+    ("/help", "list every command"),
+    ("/setkey KEY VALUE", "set an API key after install (secrets saved, not echoed)"),
+    ("/keys", "show which API keys are set and which are missing"),
+    ("/status", "now, session mode, shadow clock and alert budget used"),
+    ("/board", "the latest ranked board (top candidates)"),
+    ("/runners", "today's runner list (big movers)"),
+    ("/miss", "today's MISS REPORT"),
+    ("/alerts", "today's ignition alerts"),
+    ("/shadow", "the 10-trading-day shadow clock"),
+    ("/log", "recent event log"),
+    ("/doctor", "live checker: config, sources, calendar, clock"),
+)
 
-def handle_command(self, text: str, sender_chat: str, cfg: "Config") -> Optional[str]:
-    """Process one inbound Telegram command from the configured chat.
+
+def _usage() -> str:
+    return "ROTD commands:\n" + "\n".join(f"  {c[0]:<20} {c[1]}" for c in COMMANDS)
+
+
+def handle_command(self, text: str, sender_chat: str, cfg: "Config",
+                   ctx: Optional[dict] = None) -> Optional[str]:
+    """Process one inbound Telegram command from the configured owner chat.
 
     Returns a human-readable reply string, or ``None`` if the message was not a
     command for this bot. Commands are accepted only from ``TELEGRAM_CHAT_ID``
-    (the installer writes it). Unknown or denied keys are refused without writing.
+    (the installer writes it); other chats are ignored silently. ``ctx`` is an
+    optional dict ``{"store": Store, "cfg": Config}`` that lets data commands read
+    live state. ``setkey``/``start``/``help`` work without it.
     """
     if not text or not text.startswith("/"):
         return None
@@ -219,6 +245,13 @@ def handle_command(self, text: str, sender_chat: str, cfg: "Config") -> Optional
         return None
     parts = text[1:].split()
     name = parts[0].lower().split("@")[0]
+    arg = " ".join(parts[1:]).strip()
+
+    if name in ("start", "help"):
+        return ("ROTD — Runner of the Day. Watching the sub-$10 universe.\n"
+                + _usage()
+                + "\n\nSet a key any time, e.g. /setkey FINVIZ_TOKEN <token>")
+
     if name == "setkey":
         if len(parts) < 3:
             return ("usage: /setkey KEY VALUE  — settable keys: "
@@ -228,13 +261,129 @@ def handle_command(self, text: str, sender_chat: str, cfg: "Config") -> Optional
             return f"refused: {key} is not a settable key"
         try:
             cfg.append_to_file(key, value)
+            from .config import restrict_permissions
+            try:
+                restrict_permissions(cfg.path)
+            except Exception:  # noqa: BLE001
+                pass
         except Exception as exc:  # noqa: BLE001
             return f"error saving {key}: {scrub(str(exc), self._secrets)}"
         return f"ok: {key} updated (applied on next cycle)"
-    if name in ("start", "help"):
-        return ("ROTD is watching the sub-$10 universe in shadow mode. "
-                "Add a key with: /setkey FINVIZ_TOKEN <token>")
-    return None
+
+    if name == "keys":
+        lines = ["ROTD API keys:"]
+        for k in SETTABLE_KEYS:
+            v = cfg.raw(k)
+            lines.append(f"  {k:<18} {'set' if v else 'missing'}")
+        return "\n".join(lines)
+
+    if name == "status":
+        from .shadow import status as shadow_status
+        si = session_info()
+        st = shadow_status(ctx["store"], cfg=cfg) if ctx else shadow_status(None, cfg=cfg)
+        budget = cfg.int("ALERT_BUDGET_PER_DAY", 3)
+        used = 0
+        if ctx and ctx.get("store"):
+            used = ctx["store"].count_alerts(si.trading_day, "IGNITION")
+        blk = " (BLOCKED: shadow incomplete)" if not st.live_allowed else ""
+        return (f"ROTD status  {fmt_ts(now_utc())}\n"
+                f"  mode={si.mode}  trading_day={si.trading_day}  half={si.is_half}\n"
+                f"  {st.line()}\n"
+                f"  ignition budget: {used}/{budget}{blk}\n"
+                f"  shadow mode: {'on' if cfg.bool('SHADOW') else 'off'}")
+
+    if name == "shadow":
+        from .shadow import status as shadow_status
+        st = shadow_status(None, cfg=cfg) if not ctx else \
+            shadow_status(ctx["store"], cfg=cfg)
+        return f"Shadow clock\n  {st.line()}"
+
+    if name == "board":
+        if not ctx or not ctx.get("store"):
+            return "no data yet (run `rotd listen` first)."
+        from datetime import date as _d
+        day = session_info().trading_day
+        snap = ctx["store"].latest_snapshot(day)
+        if not snap:
+            return f"no snapshot for {day} yet."
+        from .notifier import render_board, _when
+        # Rebuild a tiny board from the latest candidates that passed gates.
+        rows = ctx["store"].query(
+            "SELECT symbol, score, rank FROM candidates WHERE trading_day=? "
+            "ORDER BY cycle_ts DESC, rank ASC LIMIT ?",
+            (day.isoformat(), cfg.int("BOARD_SIZE", 5)))
+        scored = []
+        for r in rows:
+            if r["score"] is None:
+                continue
+            class _S:  # minimal stand-in for Scored used by render_board
+                def __init__(s, sym, sc, rk):
+                    s.symbol = sym; s.score = float(sc); s.rank = int(rk) if rk else None
+            scored.append(_S(r["symbol"], r["score"], r["rank"]))
+        if not scored:
+            return (f"📋 ROTD BOARD — none\n{_when(None)}  |  "
+                    f"mode {session_info().mode}  |  data {snap['data_grade']}\n"
+                    f"(no qualified candidates this cycle)")
+        return render_board(scored, session_info().mode, snap["data_grade"], {}, now_utc())
+
+    if name == "runners":
+        if not ctx or not ctx.get("store"):
+            return "no data yet (run `rotd listen` first)."
+        from datetime import date as _d
+        day = session_info().trading_day
+        rows = ctx["store"].runners_for_day(day)
+        if not rows:
+            return f"no runners logged for {day} yet."
+        lines = [f"🏁 ROTD runners — {day}", ""]
+        for r in rows[:15]:
+            lines.append(f"  ${r['symbol']:<6} +{r['gain_pct']:.0f}%  "
+                         f"dv ${r['dollar_vol']/1e6:.1f}M  illiq={'Y' if r['illiquid'] else 'N'}")
+        return "\n".join(lines)
+
+    if name == "miss":
+        if not ctx or not ctx.get("store"):
+            return "no data yet (run `rotd listen` first)."
+        from datetime import date as _d
+        day = session_info().trading_day
+        report = ctx["store"].get_miss_report(day)
+        if not report:
+            return f"no MISS REPORT for {day} yet."
+        from .notifier import render_miss_report
+        return render_miss_report(report)
+
+    if name == "alerts":
+        if not ctx or not ctx.get("store"):
+            return "no data yet (run `rotd listen` first)."
+        from datetime import date as _d
+        day = session_info().trading_day
+        rows = ctx["store"].alerts_for_day(day)
+        if not rows:
+            return f"no alerts for {day} yet."
+        lines = [f"🔔 ROTD alerts — {day}", ""]
+        for a in rows:
+            lines.append(f"  ${a['symbol']:<6} {a['kind']:<8} score {a['score']} "
+                         f"rank {a['rank']} slot {a['budget_slot']}")
+        return "\n".join(lines)
+
+    if name == "log":
+        if not ctx or not ctx.get("store"):
+            return "no data yet (run `rotd listen` first)."
+        rows = ctx["store"].recent_events(10)
+        if not rows:
+            return "no events yet."
+        lines = ["ROTD recent events:"]
+        for e in rows:
+            lines.append(f"  {e['ts'][:19]} {e['level']:<5} {e['source']}: "
+                         f"{str(e['message'])[:80]}")
+        return "\n".join(lines)
+
+    if name == "doctor":
+        return ("run `rotd doctor` for the full live check, or watch the service "
+                "logs with `journalctl -u rotd -f`. Quick status: "
+                + ("shadow ON" if cfg.bool("SHADOW") else "shadow OFF"))
+
+    # Unknown command from the owner chat: nudge toward /help.
+    return f"unknown command: /{name}\n" + _usage()
 
 
 def split_message(text: str, limit: int = MAX_MESSAGE) -> list[str]:
@@ -324,10 +473,11 @@ class FakeTelegram:
     def chat_id(self) -> str:
         return str(self.cfg.raw("TELEGRAM_CHAT_ID") if self.cfg else "")
 
-    def handle_command(self, text: str, sender_chat: str, cfg: "Config") -> Optional[str]:
+    def handle_command(self, text: str, sender_chat: str, cfg: "Config",
+                       ctx: Optional[dict] = None) -> Optional[str]:
         # Record the command so tests can assert on it; no network side effects.
         self.commands.append(text)
-        return handle_command(self, text, sender_chat, cfg)
+        return handle_command(self, text, sender_chat, cfg, ctx)
 
     def detect_chat_id(self, attempts: int = 30, timeout: int = 2) -> Optional[str]:
         # No network: return whatever was configured, else None.

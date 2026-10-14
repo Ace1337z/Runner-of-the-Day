@@ -205,5 +205,5 @@ if command -v systemctl >/dev/null 2>&1 && [[ -n "$SUDO" || "$(id -u)" -eq 0 ]];
     echo
     info "installed. Logs: journalctl -u $SERVICE_NAME -f"
 else
-    info "installed. Start it with: $ROTD --config $CONFIG_FILE run"
+    info "installed. Start it with: $ROTD --config $CONFIG_FILE listen"
 fi

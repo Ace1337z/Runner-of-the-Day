@@ -170,6 +170,8 @@ _GLOBAL: list[Setting] = [
     Setting("UNIVERSE_POLL_S", "30", "s", "Universe sweep cadence (mode profile overrides)."),
     Setting("MOVERS_POLL_S", "20", "s", "Mover-screen cadence (mode profile overrides)."),
     Setting("WATCHDOG_STALL_S", "180", "s", "A cycle taking longer than this trips the watchdog."),
+    Setting("LISTEN_POLL_S", "5", "s", "Loop cadence of `rotd listen`: one cycle + one Telegram command poll (§14.4)."),
+    Setting("TELEGRAM_POLL_TIMEOUT_S", "20", "s", "Long-poll timeout for getUpdates in `rotd listen`."),
     Setting("SHADOW", "0", "bool", "1 = decide and log but never push (rotd shadow)."),
     Setting("SELFTEST", "0", "bool", "1 = fully offline deterministic mode."),
     Setting("SHADOW_DAYS_REQUIRED", "10", "trading_days", "Shadow clock length before live pushes are allowed (section 17 Phase 6)."),

@@ -152,6 +152,123 @@ completes, `rotd run` refuses to push (`exit 3`) and logs the reason. This is
 the default safety gate — ROTD proves itself silent-when-wrong before it can
 speak.
 
+## Architecture
+
+`rotd listen` is the long-running process. Every `LISTEN_POLL_S` (default 5s)
+it (1) reloads config if `config.env` changed, (2) runs one decision **cycle**,
+and (3) polls Telegram `getUpdates` and **replies** to commands from the owner
+chat. `run`/`shadow` remain one-shot manual commands; `listen` is what the
+systemd unit runs.
+
+```mermaid
+flowchart TD
+    A[rotd listen daemon] -->|every LISTEN_POLL_S| B{reload config if changed}
+    B --> C[Decision cycle]
+    C --> D[sources: Finviz universe + fresh quote]
+    D --> E[normalize: canonical records + data grade]
+    E --> F[gates G-DATA/G-PHASE/G-PRICE/G-HALT/G-TRADES]
+    F --> G[score + rank top 5 BOARD]
+    G --> H[state machine WATCH→QUALIFIED→BOARD→ARMED→IGNITION]
+    H --> I{SHADOW clock complete?}
+    I -- no --> J[log only, never push]
+    I -- yes --> K[push IGNITION/BOARD/ROTD to Telegram]
+    A -->|long-poll getUpdates| L[owner chat command]
+    L --> M[handle_command: /setkey /status /board /runners /miss /alerts /shadow /log /keys /doctor]
+    M --> N[reply via send]
+    K --> O[(SQLite: snapshots, candidates, alerts, outcomes, MISS REPORT)]
+    J --> O
+    O --> P[finalize → daily MISS REPORT]
+```
+
+### What an alert looks like
+
+All messages are rendered by `notifier.py` from the decision object — never
+from model prose. Times show **ET** and **KL** (Asia/Kuala Lumpur) for the owner.
+
+**IGNITION** (spends the budget; the one alert that pushes live):
+```
+🚨 ROTD IGNITION — $ABCD
+2026-10-14 09:35:02 ET / 21:35 KL  |  mode OPEN  |  slot R1
+
+Score 84/100  (rank 1)
+Price $3.42  (+6.2% vs prev close)
+Spread 0.6%   Vol 8.4M   Dollar-vol $28.7M
+Float 42M   Short 12.0%
+
+Why now:
+  TAPE       30.0/30
+  CATALYST   21.0/25
+  FUEL       17.0/20
+  STRUCTURE  11.0/15
+  CONTEXT     5.0/10
+Flags: ARMED_OK, BOARD_HELD
+
+Risk: this is decision support, not advice; runners reverse hard.
+```
+
+**BOARD** (silent, scheduled in `BOARD_SCHEDULE_ET`):
+```
+📋 ROTD BOARD — top 5
+2026-10-14 09:35:02 ET / 21:35 KL  |  mode OPEN  |  data B
+
+  1. $ABCD   84.0        $3.42   +6.2%
+  2. $ZXYZ   70.0        $0.88   +3.1%
+```
+
+**ABORT** (a fired alert that no longer holds):
+```
+⚠️ ROTD ABORT — $ABCD
+2026-10-14 09:52:10 ET / 21:52 KL  |  reason ABORT_VWAP
+price fell 5m below the alert VWAP; ignition condition no longer holds
+Price now $3.21
+```
+
+**ROTD** (the day's qualified rank-1 pick, end of day):
+```
+🏆 ROTD — $ABCD
+2026-10-14 09:35:02 ET / 21:35 KL  |  score 84/100
+Price $3.42  (+6.2%)
+```
+
+**MISS REPORT** (always produced, even on a zero-alert day; `/miss` to read it):
+```
+📊 ROTD MISS REPORT — 2026-10-14
+alerts 1  |  runners in list 3  |  caught 1  |  missed 2
+Data grade for the day: B  (mean B)
+Caught:
+  ✓ $ABCD lead 12m  max +9.4%
+Missed:
+  ✗ $WXYZ +140% — no fresh quote (G-DATA=STALE)
+Quiet day: no sub-$10 names ran, and ROTD stayed silent. That is a correct outcome, not a failure.
+```
+
+### Telegram commands
+
+All commands are accepted only from the configured `TELEGRAM_CHAT_ID` (the
+installer writes it). Any other chat is ignored silently.
+
+| Command | What it does |
+| --- | --- |
+| `/start`, `/help` | Show the command menu |
+| `/setkey KEY VALUE` | Set an API key after install (allowlisted; secrets saved, not echoed) |
+| `/keys` | Show which API keys are set vs missing |
+| `/status` | Now, session mode, shadow clock, alert budget used |
+| `/board` | The latest ranked board (top candidates) |
+| `/runners` | Today's runner list (big movers) |
+| `/miss` | Today's MISS REPORT |
+| `/alerts` | Today's ignition alerts |
+| `/shadow` | The 10-trading-day shadow clock |
+| `/log` | Recent event log |
+| `/doctor` | Live checker hint (run `rotd doctor` for the full report) |
+
+To add a source after install, e.g. the only key that makes ROTD produce
+candidates:
+```
+/setkey FINVIZ_TOKEN <token>
+/keys
+```
+Changes apply on the next cycle (the `listen` loop reloads `config.env`).
+
 ## Complete profile
 
 Every threshold is a **named setting** in `config.py` with a unit, a starting
