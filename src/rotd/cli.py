@@ -422,6 +422,28 @@ def cmd_detect_chat(cfg: Config, args: argparse.Namespace) -> int:
     return 1
 
 
+def _real_telegram(cfg: Config):
+    """Force the REAL Telegram client (never FakeTelegram) for install-time checks."""
+    if not cfg.raw("TELEGRAM_TOKEN"):
+        return None
+    return TelegramClient(cfg, secrets=cfg.secret_values)
+
+
+def cmd_telegram_check(cfg: Config, args: argparse.Namespace) -> int:
+    """Verify the real Telegram bot token by calling getMe (network, live client).
+
+    Used by the installer so it fails loudly on a bad token instead of silently
+    falling back to FakeTelegram. Never returns a fake-client result.
+    """
+    tg = _real_telegram(cfg)
+    if tg is None:
+        print("TELEGRAM_TOKEN not set — cannot check a real bot. Enter it or set TELEGRAM_TOKEN.")
+        return 2
+    ok, msg = tg.health()
+    print(f"telegram (live): {'OK' if ok else 'FAIL'} — {msg}")
+    return 0 if ok else 1
+
+
 def cmd_config(cfg: Config, args: argparse.Namespace) -> int:
     if args.key:
         if args.key not in {s.key for s in __import__("rotd.config", fromlist=["SETTINGS"]).SETTINGS}:
@@ -493,6 +515,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     dc = sub.add_parser("detect-chat", help="auto-detect TELEGRAM_CHAT_ID from a bot message")
     dc.set_defaults(func=cmd_detect_chat)
+
+    tc = sub.add_parser("telegram-check", help="verify the REAL bot token via getMe (live, no fake)")
+    tc.set_defaults(func=cmd_telegram_check)
 
     p.add_argument("--version", action="version", version=f"rotd {__version__}")
     return p

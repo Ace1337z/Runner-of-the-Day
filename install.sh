@@ -59,14 +59,30 @@ info "Step 1/9: credentials (asked before anything is downloaded)"
 echo "Secrets are read with hidden input and are never echoed."
 echo "Only Telegram is required; every other key can be set later with /setkey KEY VALUE."
 
-if [[ "${ROTD_NONINTERACTIVE:-0}" == "1" || ! -t 0 ]]; then
+# Always ask for Telegram when there is a real terminal (even if stdin is a pipe,
+# e.g. `wget -O - ... | bash` or `curl ... | bash`). Only skip the prompt in a
+# true non-interactive context (no tty AND no ROTD_NONINTERACTIVE env + no values).
+HAS_TTY=0
+if [[ -t 1 ]] && [[ -e /dev/tty ]]; then
+    HAS_TTY=1
+fi
+if [[ "${ROTD_NONINTERACTIVE:-0}" == "1" ]]; then
     info "non-interactive mode: reading values from the environment"
     TELEGRAM_TOKEN="${TELEGRAM_TOKEN:-}"
     TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
-else
+elif [[ "$HAS_TTY" == "1" ]]; then
     # Interactive: hidden input via /dev/tty (works even when stdin is a pipe).
     read -r -s -p "Telegram bot token (@BotFather): " TELEGRAM_TOKEN </dev/tty; echo
     read -r -s -p "Telegram chat id (or blank to auto-detect): " TELEGRAM_CHAT_ID </dev/tty; echo
+else
+    # No terminal at all (CI / ssh without tty): take env values, else empty.
+    info "no interactive terminal: reading Telegram from the environment (set TELEGRAM_TOKEN/TELEGRAM_CHAT_ID)"
+    TELEGRAM_TOKEN="${TELEGRAM_TOKEN:-}"
+    TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
+fi
+if [[ -z "$TELEGRAM_TOKEN" ]]; then
+    warn "no Telegram bot token supplied — ROTD will run in shadow with FakeTelegram (no bot)."
+    warn "set it later with: rotd setkey TELEGRAM_TOKEN <token>"
 fi
 
 # Every optional credential is read from the environment only (not prompted). Set
@@ -137,11 +153,19 @@ export OPENAI_BASE_URL OPENAI_API_KEY OPENAI_MODEL
 "$ROTD" --config "$CONFIG_FILE" setup --non-interactive --skip-doctor
 chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 
-# --- 6. Telegram chat id ---------------------------------------------------
-info "Step 6/9: Telegram chat id (so the bot can receive your settings)"
-if [[ -z "${TELEGRAM_CHAT_ID:-}" && -t 0 ]]; then
+# --- 6. verify the REAL Telegram bot, then resolve the chat id ------------
+info "Step 6/9: verify the real Telegram bot and resolve the chat id"
+if [[ -z "$TELEGRAM_TOKEN" ]]; then
+    # You asked for real Telegram at install; do not silently fall back to fakes.
+    fail "no Telegram bot token — ROTD needs a real bot. Re-run and enter it, or set TELEGRAM_TOKEN and re-run with ROTD_NONINTERACTIVE=1."
+fi
+info "checking the bot token against the real Telegram API (getMe)..."
+"$ROTD" --config "$CONFIG_FILE" telegram-check || \
+    fail "the Telegram bot token is invalid or unreachable. Check it at @BotFather and re-run install.sh."
+if [[ -z "${TELEGRAM_CHAT_ID:-}" && "$HAS_TTY" == "1" ]]; then
+    info "no chat id yet — message your bot now so we can auto-detect it..."
     "$ROTD" --config "$CONFIG_FILE" detect-chat || \
-        warn "set the chat id later with: rotd setkey TELEGRAM_CHAT_ID <id>"
+        warn "could not auto-detect; set it later with: rotd setkey TELEGRAM_CHAT_ID <id>"
 fi
 echo
 info "From the chat you can set anything else at any time, e.g.:"
