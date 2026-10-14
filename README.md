@@ -154,11 +154,19 @@ speak.
 
 ## Architecture
 
-`rotd listen` is the long-running process. Every `LISTEN_POLL_S` (default 5s)
-it (1) reloads config if `config.env` changed, (2) runs one decision **cycle**,
-and (3) polls Telegram `getUpdates` and **replies** to commands from the owner
-chat. `run`/`shadow` remain one-shot manual commands; `listen` is what the
-systemd unit runs.
+`rotd listen` is the long-running process. The Telegram command poll runs on the
+**main thread** (so a message is answered within ~`LISTEN_POLL_S` at most), while
+the heavy decision **cycle** runs on a **worker thread** — a cycle can take many
+seconds (Finviz scrape, optional catalyst LLM call up to `CATALYST_TIMEOUT_S=45s`),
+and it must never sit in front of a user command. Each pass: (1) short-poll
+`getUpdates` and reply, (2) start the cycle off-thread, (3) short-poll again so a
+command sent *during* a cycle is still answered promptly, (4) sleep the rest of
+the interval and reload `config.env` if it changed. `run`/`shadow` remain one-shot
+manual commands; `listen` is what the systemd unit runs.
+
+> **Responsiveness:** send "typing…" before each reply and poll twice per tick, so
+> commands are never blocked behind a cycle. Set `SHADOW_RUN_WHEN_CLOSED=0` to stop
+> running cycles outside NYSE sessions (commands are still answered instantly).
 
 ```mermaid
 flowchart TD

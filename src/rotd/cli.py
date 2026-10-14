@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 from datetime import date
 from pathlib import Path
@@ -260,11 +261,20 @@ def cmd_finalize(cfg: Config, args: argparse.Namespace) -> int:
 def cmd_listen(cfg: Config, args: argparse.Namespace) -> int:
     """Persistent daemon: run decision cycles AND reply to Telegram commands.
 
-    This is the process the systemd unit runs. Every ``LISTEN_POLL_S`` it reloads
-    the config (so ``/setkey`` changes apply live), runs one decision cycle, and
-    polls ``getUpdates`` to answer inbound commands from the owner chat. There is a
-    single long-poll against Telegram so messages are answered within ~one interval
-    without busy-spinning. ``--once`` runs a single pass and exits (used by tests).
+    This is the process the systemd unit runs. The loop answers Telegram commands
+    on the main thread (so a message is seen within ``LISTEN_POLL_S`` at most),
+    while the heavy decision cycle runs on a worker thread so it can never block a
+    reply. A cycle in progress is allowed to finish before the next one starts.
+
+    Flow per pass:
+      1. short-poll ``getUpdates`` and reply (fast — commands are never delayed
+         behind a cycle);
+      2. start the decision cycle on a worker thread;
+      3. short-poll again for the remaining interval so a command sent during a
+         cycle is answered immediately;
+      4. sleep the rest of the interval, then reload config if it changed.
+
+    ``--once`` runs a single pass and exits (used by tests).
     """
     from . import shadow
     store = Store(cfg.db_path)
@@ -275,71 +285,93 @@ def cmd_listen(cfg: Config, args: argparse.Namespace) -> int:
     if cfg.bool("SHADOW_AUTOSTART") and cfg.bool("SHADOW") and \
             store.get_meta("shadow_start") is None:
         shadow.start(store, si0.trading_day)
-    log.info("rotd listen: polling every %ss; live pushes=%s",
-             cfg.int("LISTEN_POLL_S", 5), not cfg.bool("SHADOW"))
     poll_s = cfg.int("LISTEN_POLL_S", 5)
-    timeout = cfg.int("TELEGRAM_POLL_TIMEOUT_S", 20)
+    split = max(1, poll_s // 2)  # time for each short poll so total >= poll_s
+    log.info("rotd listen: tick %ss; live pushes=%s; cycle runs off-thread",
+             poll_s, not cfg.bool("SHADOW"))
     offset = 0
+    # Guards the worker-cycle so only one runs at a time (Store is locked, but we
+    # avoid piling up cycles that would just contend on the DB).
+    cycle_thread: Optional[threading.Thread] = None
+
+    def maybe_cycle() -> None:
+        nonlocal cycle_thread
+        if cycle_thread is not None and cycle_thread.is_alive():
+            return  # previous cycle still running; skip this tick (back-pressure)
+        if not cfg.bool("SHADOW_RUN_WHEN_CLOSED", True) and si0 and \
+                not session_info().is_session:
+            return  # user opted out of after-hours cycles
+        si = session_info()
+        if cfg.bool("SHADOW") and cfg.bool("SHADOW_AUTOSTART") and \
+                store.get_meta("shadow_start") is None:
+            shadow.start(store, si.trading_day)
+        cycle_thread = threading.Thread(
+            target=lambda: _safe_cycle(rt, si.mode, si.trading_day), daemon=True)
+        cycle_thread.start()
+
     if getattr(args, "once", False):
-        _listen_once(cfg, store, rt, tg, clients, shadow, poll_s, timeout, offset)
+        offset = _listen_reply(cfg, store, tg, offset, split)
+        maybe_cycle()
+        if cycle_thread is not None:
+            cycle_thread.join(timeout=max(2, poll_s))
         store.close()
         return 0
     try:
         while True:
-            offset = _listen_once(cfg, store, rt, tg, clients, shadow,
-                                  poll_s, timeout, offset)
+            # 1. answer commands first (no cycle in front of them)
+            offset = _listen_reply(cfg, store, tg, offset, split)
+            # 2. kick off the cycle on a worker thread
+            maybe_cycle()
+            # 3. keep answering during the cycle window
+            offset = _listen_reply(cfg, store, tg, offset, split)
+            # 4. finish the interval, then apply any /setkey edits
+            time.sleep(max(0.5, poll_s - 2 * split))
             cfg.reload_if_changed()
     except KeyboardInterrupt:  # pragma: no cover
         log.info("rotd listen: interrupted, exiting")
+    if cycle_thread is not None:
+        cycle_thread.join(timeout=5)
     store.close()
     return 0
 
 
-def _listen_once(cfg, store, rt, tg, clients, shadow, poll_s, timeout, offset) -> int:
-    """One pass: run a cycle, then answer queued Telegram commands. Returns offset."""
-    si = session_info()
-    if cfg.bool("SHADOW") and cfg.bool("SHADOW_AUTOSTART") and \
-            store.get_meta("shadow_start") is None:
-        shadow.start(store, si.trading_day)
-    ctx = {"store": store, "cfg": cfg}
-    if cfg.raw("TELEGRAM_TOKEN") and not isinstance(tg, FakeTelegram):
-        # Answer commands queued since the last offset (short poll; long-poll below).
-        updates = tg.get_updates(offset=offset, timeout=min(poll_s, timeout))
-        for upd in updates:
-            offset = max(offset, int(upd.get("update_id", 0)) + 1)
-            msg = upd.get("message") or upd.get("edited_message") or {}
-            text = (msg.get("text") or "").strip()
-            sender = str((msg.get("chat") or {}).get("id") or "")
-            if not text:
-                continue
-            reply = tg.handle_command(text, sender, cfg, ctx=ctx)
-            if reply is not None:
-                try:
-                    tg.send(reply)
-                except Exception as exc:  # noqa: BLE001
-                    log.error("listen: reply failed: %s", exc)
-    else:
-        # For tests / FakeTelegram, drain any injected updates regardless of token.
-        for upd in tg.get_updates(offset=offset, timeout=0):
-            offset = max(offset, int(upd.get("update_id", 0)) + 1)
-            msg = upd.get("message") or {}
-            text = (msg.get("text") or "").strip()
-            sender = str((msg.get("chat") or {}).get("id") or "")
-            if not text:
-                continue
-            reply = tg.handle_command(text, sender, cfg, ctx=ctx)
-            if reply is not None:
-                tg.send(reply)
-    # Run the decision cycle (logs in shadow; pushes only when not in shadow).
+def _safe_cycle(rt: "Runtime", mode: str, day: "date") -> None:
+    """Run one decision cycle, swallowing errors so the daemon keeps listening."""
     try:
-        rt.cycle(si.mode, si.trading_day)
+        rt.cycle(mode, day)
     except Exception as exc:  # noqa: BLE001
         log.warning("listen: cycle failed: %s", exc)
-    time.sleep(poll_s)
+
+
+def _listen_reply(cfg, store, tg, offset, wait_s) -> int:
+    """Drain queued Telegram commands (short poll) and reply. Returns new offset."""
+    ctx = {"store": store, "cfg": cfg}
+    if cfg.raw("TELEGRAM_TOKEN") and not isinstance(tg, FakeTelegram):
+        updates = tg.get_updates(offset=offset, timeout=wait_s)
+    else:
+        updates = tg.get_updates(offset=offset, timeout=0)  # tests / FakeTelegram
+    for upd in updates:
+        offset = max(offset, int(upd.get("update_id", 0)) + 1)
+        msg = upd.get("message") or upd.get("edited_message") or {}
+        text = (msg.get("text") or "").strip()
+        sender = str((msg.get("chat") or {}).get("id") or "")
+        if not text:
+            continue
+        reply = tg.handle_command(text, sender, cfg, ctx=ctx)
+        if reply is not None:
+            # Show "typing" for a beat, then send — feels responsive on slow cycles.
+            try:
+                tg.send_chat_action("typing", chat_id=sender if sender else None)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                tg.send(reply, chat_id=sender if sender else None)
+            except Exception as exc:  # noqa: BLE001
+                log.error("listen: reply failed: %s", exc)
     return offset
 
 
-
+def cmd_finalize(cfg: Config, args: argparse.Namespace) -> int:
     """End of day: build the runner list and the MISS REPORT for a completed day."""
     store = Store(cfg.db_path)
     si = session_info()

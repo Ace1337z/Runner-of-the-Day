@@ -176,6 +176,7 @@ _GLOBAL: list[Setting] = [
     Setting("SELFTEST", "0", "bool", "1 = fully offline deterministic mode."),
     Setting("SHADOW_DAYS_REQUIRED", "10", "trading_days", "Shadow clock length before live pushes are allowed (section 17 Phase 6)."),
     Setting("SHADOW_AUTOSTART", "0", "bool", "1 = start the shadow clock automatically on the first shadow cycle."),
+    Setting("SHADOW_RUN_WHEN_CLOSED", "1", "bool", "1 = keep running decision cycles outside NYSE sessions (live off-thread so commands stay responsive)."),
 
     # --- secrets (never displayed / never logged) ---
     Setting("FINVIZ_TOKEN", "", "", "Finviz Elite token.", secret=True),
