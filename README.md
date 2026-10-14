@@ -23,14 +23,41 @@ its data is inconsistent. ROTD fixes that structurally:
 
 ## Install
 
+One line. Clone, install, drop a safe default config, and ask **only** for your
+Telegram bot token + chat id:
+
 ```bash
-pip install -e .[dev] && rotd doctor
+wget -O - https://raw.githubusercontent.com/Ace1337z/big-whale-penny-tracker/main/install.sh | bash
+# or:
+curl -fsSL https://raw.githubusercontent.com/Ace1337z/big-whale-penny-tracker/main/install.sh | bash
 ```
 
-(`python -m rotd.cli` works too if you don't install.) Copy `config.env` and fill
-in the source tokens (Finviz Elite token is the only one required to run; see
-`docs/VERIFIED.md`). Secrets stay in `config.env` (mode 600, gitignored) — they
-are never read from the command line and are redacted from logs.
+What the installer does:
+1. Clones the repo and runs `pip install -e .[dev]`.
+2. Copies `config.env.example` → `$HOME/.rotd/rotd.env` (mode 600, gitignored).
+3. Prompts **once** for `TELEGRAM_TOKEN` and `TELEGRAM_CHAT_ID` (from @BotFather).
+4. Runs `rotd doctor` so you can see the system is wired up.
+
+Every other API key defaults to empty (safe) and can be added **later, from
+Telegram itself** — from your configured chat, send:
+
+```
+/setkey FINVIZ_TOKEN <token>      # the only key needed to produce candidates
+/setkey TWELVEDATA_KEY <key>      # fresh regular-session quote
+/setkey FINNHUB_KEY <key>         # quote + market status
+/setkey ALPHA_VANTAGE_KEY <key>   # global quote
+/setkey ALPACA_KEY <id>           # unblocks the bid/ask book -> re-arms G-SPREAD/G-EXIT
+/setkey ALPACA_SECRET <secret>
+```
+
+`/setkey` writes only allowlisted keys to the config file (mode 600), refuses
+anything else, and ignores messages from any chat but the configured
+`TELEGRAM_CHAT_ID`. Without any key ROTD still runs in shadow mode and the daily
+MISS REPORT lists every gate that was `NOT_ENFORCED` for lack of a feed.
+
+Secrets are never read from the command line and are redacted from logs. If you
+prefer a manual install: `pip install -e .[dev] && rotd doctor`
+(`python -m rotd.cli` works too if you don't install).
 
 ## Status
 
@@ -110,20 +137,184 @@ completes, `rotd run` refuses to push (`exit 3`) and logs the reason. This is
 the default safety gate — ROTD proves itself silent-when-wrong before it can
 speak.
 
-## Configuration
+## Complete profile
 
-Every threshold is a named setting in `config.py` with a unit, a starting value
-and a one-line rationale — no magic numbers. Show any value with
-`rotd config KEY`. Highlights:
+Every threshold is a **named setting** in `config.py` with a unit, a starting
+value and a one-line rationale — no magic numbers in code. `tests/test_config.py`
+fails if any setting lacks a unit or rationale, or is referenced but missing.
+Inspect any value with `rotd config KEY`. The full registry is below, grouped by
+purpose. Secrets (`secret=True`) are never displayed or logged.
 
-| Setting | Default | Meaning |
+### Config file & keys
+- Location: `$HOME/.rotd/rotd.env` (owner-only, mode 600 on POSIX / ACL on Windows),
+  gitignored. Override with `ROTD_CONFIG` or `--config`.
+- At install only `TELEGRAM_TOKEN` + `TELEGRAM_CHAT_ID` are set. Add the rest
+  later from Telegram via `/setkey KEY VALUE` (allowlisted keys only).
+- Secrets never travel on the command line and are scrubbed from logs.
+
+| Setting | Default | Unit | Meaning |
+|---|---|---|---|
+| `FINVIZ_TOKEN` ★ | (empty) | — | Finviz Elite token — the only key required to run. |
+| `FINVIZ_BASE` | `https://elite.finviz.com` | url | Finviz base URL. |
+| `TWELVEDATA_KEY` ★ | (empty) | — | TwelveData key (regular-session 1-min bars + quote). |
+| `FINNHUB_KEY` ★ | (empty) | — | Finnhub key (quote + market status). |
+| `ALPHA_VANTAGE_KEY` ★ | (empty) | — | Alpha Vantage key (global quote). |
+| `ALPACA_KEY` ★ / `ALPACA_SECRET` ★ | (empty) | — | Alpaca key id / secret — unblocks the bid/ask book. |
+| `ALPACA_FEED` | `iex` | feed | Alpaca data feed (iex = single venue). |
+| `SEC_USER_AGENT` | `ROTD research` | text | SEC EDGAR requires a descriptive User-Agent. |
+| `AI_BASE_URL` | (empty) | url | OpenAI-compatible base URL for the catalyst auditor. |
+| `AI_KEY` ★ | (empty) | — | Catalyst model API key (rules-only if empty). |
+| `AI_MODEL` | `deepseek-v4.1-flash` | model | Catalyst model id. |
+| `TELEGRAM_TOKEN` ★ | (empty) | — | Telegram bot token (asked at install). |
+| `TELEGRAM_CHAT_ID` | (empty) | — | The only chat allowed to read/command (asked at install). |
+
+★ = secret (never displayed / logged).
+
+### Universe & scope
+| Setting | Default | Unit | Meaning |
+|---|---|---|---|
+| `MAX_PRICE` | `10.00` | USD | Universe ceiling (sub-$10). **No price floor.** |
+| `INCLUDE_OTC` | `0` | bool | OTC off — poorer data, different rules. |
+| `INCLUDE_DERIVATIVES` | `0` | bool | Warrants/rights/units excluded. |
+| `PRICE_BANDS` | `0.20,0.50,1,5,10` | USD bounds | Tier boundaries for metric / MISS breakdowns. |
+| `SYMPATHY_ENABLED` | `0` | bool | Sector-sympathy adds off until proven. |
+| `CARRY_LOOKBACK_D` | `90` | days | Carry-list "recent runner" window. |
+
+### Data reconciliation (`DATA-01..12`)
+| Setting | Default | Unit | Meaning |
+|---|---|---|---|
+| `PRICE_CONFLICT_PCT_REG` | `1.0` | % | Two sources >1% apart in regular hours ⇒ CONFLICT. |
+| `PRICE_CONFLICT_PCT_EXT` | `2.0` | % | Same in extended hours. |
+| `QUOTE_MAX_AGE_S_REG` | `20` | s | A regular-hours quote older than this is STALE. |
+| `QUOTE_MAX_AGE_S_EXT` | `60` | s | An extended-hours quote older than this is STALE. |
+| `BAR_MAX_AGE_S` | `90` | s | A bar series whose last bar is older than this is STALE. |
+| `FLOAT_CONFLICT_FACTOR` | `1.5` | x | Two float sources >1.5× apart ⇒ FLOAT_CONFLICT. |
+| `SEC_SHARES_MAX_AGE_D` | `14` | days | Shares older than this can't bound float. |
+| `REVERSE_SPLIT_RECENT_D` | `90` | days | A recent reverse split flags REVERSE_SPLIT_RECENT. |
+
+### Gates (fail-closed; run before scoring)
+| Gate | Enforced? | Needs | Default setting |
+|---|---|---|---|
+| `G-PRICE` | ✅ always | `MAX_PRICE` | sub-$10, no floor |
+| `G-PHASE` | ✅ always | mode profile | OVERNIGHT never ignites |
+| `G-DATA` | ✅ always | fresh, conflict-free grade | drops stale/suspended/conflicting |
+| `G-HALT` | ✅ always | quote presence | no halt feed ⇒ defers to G-DATA (`HALT_UNKNOWN`) |
+| `G-TRADES` | ✅ always (passes) | trade-count | `MIN_TRADES_15M=0`, `MIN_AVG_TRADE=0` ⇒ NOT_ENFORCED |
+| `G-SPREAD` | ❌ OFF (G-18) | bid/ask book | `USE_SPREAD_GATE=0` ⇒ NOT_ENFORCED |
+| `G-LIQ` | ❌ OFF (G-18) | 15-min bar feed | `USE_LIQ_GATE=0` ⇒ NOT_ENFORCED |
+| `G-EXIT` | ❌ OFF (G-18) | bid/ask book | `USE_EXIT_GATE=0` ⇒ NOT_ENFORCED |
+
+OFF-by-default gates re-arm the moment a feed supplies their input (e.g. set
+`USE_SPREAD_GATE=1` / `USE_EXIT_GATE=1` once Alpaca keys are live). A name that
+fails **any enforced** gate is not scored and cannot alert.
+
+| Gate param | Default | Unit | Meaning |
+|---|---|---|---|
+| `EXT_SPREAD_MULT` | `1.5` | x | POST/PRE spreads looser by 1.5×. |
+| `SPREAD_TIERS` | `1.00:1.5,0.50:3,0.20:5,0.05:8,0.00:12` | price:max% | Max spread by price tier (loosest at the bottom). |
+| `LIQ_15M_POST` / `LIQ_15M_PRE` | `25000` | USD | 15-min dollar-volume floor in POST / PRE. |
+| `LIQ_15M_OPEN` | `100000` | USD | 15-min floor in OPEN. |
+| `LIQ_15M_MIDDAY` | `75000` | USD | 15-min floor in MIDDAY. |
+| `MIN_TRADES_15M` / `MIN_AVG_TRADE` | `0` | prints / USD | Trade-count gates; 0 = not enforced. |
+| `EXIT_TEST_USD` | `500` | USD | Test exit size for G-EXIT. |
+| `EXIT_MAX_SEC` | `60` | s | Test exit must fill within this. |
+| `EXIT_MAX_SLIP_PCT` | `2.0` | % | Test exit slippage limit. |
+
+### Scoring (0–100, uncalibrated ordering)
+| Setting | Default | Unit | Meaning |
+|---|---|---|---|
+| `W_TAPE` | `30` | points | Tape-ignition weight. |
+| `W_CATALYST` | `25` | points | Catalyst weight. |
+| `W_FUEL` | `20` | points | Fuel weight. |
+| `W_STRUCTURE` | `15` | points | Structure weight. |
+| `W_CONTEXT` | `10` | points | Context weight. |
+
+### Ranking, board & state machine (hysteresis)
+| Setting | Default | Unit | Meaning |
+|---|---|---|---|
+| `BOARD_SIZE` | `5` | names | BOARD = top 5 qualified candidates. |
+| `ROTD_MIN_SCORE` | `70` | points | Rank 1 is only ROTD if score ≥ this. |
+| `QUALIFY_CONSEC` | `2` | cycles | Consecutive fully-gated cycles to reach QUALIFIED. |
+| `BOARD_MIN_DWELL_S` | `60` | s | Must stay top-5 this long to hold BOARD. |
+| `BOARD_EXIT_RANK` | `8` | rank | Leaves BOARD only below this rank. |
+| `ARM_MAX_RANK` | `2` | rank | ARMED requires rank ≤ this. |
+| `ARM_MIN_SCORE` | `75` | points | ARMED requires score ≥ this. |
+| `CHASE_CAP_PCT` | `4.0` | % | No ignition if price is >this% above the armed level. |
+| `EXT_CONFIRM_BARS` | `2` | bars | POST/PRE need this many confirming extended bars. |
+| `REG_CONFIRM_BARS` | `1` | bars | Regular hours need this many confirming bars. |
+| `HALT_RESUME_EVAL_MIN` | `2` | minutes | Evaluate a resumption for this long after a halt. |
+
+Ladder: `WATCH → QUALIFIED → BOARD → ARMED → IGNITION`. Transitions are
+reversible and every step stores a reason.
+
+### Alert budget (scarcity)
+| Setting | Default | Unit | Meaning |
+|---|---|---|---|
+| `ALERT_BUDGET_PER_DAY` | `3` | pushes | Max IGNITION pushes per trading day. |
+| `RESERVE_SLOTS` | `1` | pushes | Reserve pushes beyond budget for exceptional names. |
+| `EXCEPTIONAL_SCORE` | `90` | points | A reserve candidate must score at least this. |
+| `ALERT_MIN_GAP_MIN` | `15` | minutes | Minimum spacing between pushes. |
+| `BOARD_SCHEDULE_ET` | `16:30,19:30,04:30,07:30,09:00,09:35` | HH:MM ET | Silent scheduled BOARD messages. |
+
+### Abort / risk control
+| Setting | Default | Unit | Meaning |
+|---|---|---|---|
+| `ABORT_VWAP_MINUTES` | `5` | minutes | A 5-min close under alert VWAP aborts. |
+| `ABORT_SPREAD_WIDE_S` | `300` | s | A wide spread this long aborts. |
+| `MIN_RR` | `2.0` | ratio | Min risk:reward; below this downgrades to ARMED. |
+
+### Tracking, grading & the runner list (MISS REPORT input)
+| Setting | Default | Unit | Meaning |
+|---|---|---|---|
+| `CHECKPOINTS_MIN` | `15,60,eod,next_open,next_close` | labels | Outcome checkpoints after reference price. |
+| `RUNNER_LIST_PCT` | `100` | % | Runner list = +this% vs prior regular close. |
+| `RUNNER_LIST_MIN_DVOL` | `5000000` | USD | Main runner-list dollar-volume floor. |
+| `RUNNER_LIST_MIN_DVOL_LOW` | `1000000` | USD | Illiquid runner-list floor. |
+| `LEAD_MARK_PCT` | `30` | % | Lead time = first seen vs crossing this %. |
+| `RUNNER_GAIN_PCT` | `30` | % | A runner reaches this before the stop. |
+| `RUNNER_STOP_PCT` | `12` | % | The loss level a runner must beat. |
+
+### Catalyst service (methodology_v3 auditor)
+| Setting | Default | Unit | Meaning |
+|---|---|---|---|
+| `CATALYST_TOP_N_EARLY` | `10` | rank | Audit a candidate's catalyst once it reaches this rank. |
+| `CATALYST_CACHE_TTL_H` | `24` | hours | Cache a verdict by (symbol, item id). |
+| `CATALYST_TIMEOUT_S` | `45` | s | LLM timeout → catalyst UNKNOWN (fails closed). |
+| `AI_PROMPT_FILE` | `methodology_v3.md` | file | System prompt under `prompts/`. |
+| `AI_TEMPERATURE` | `0.0` | float | Auditor temperature (0 required). |
+| `AI_MAX_TOKENS` | `1200` | tokens | Auditor response cap. |
+| `AI_CAUSE_WINDOW_H` | `4` | hours | A news item is FRESH inside this window. |
+| `CALIBRATION_CLAMP` | `0.25` | float | Max confidence-grade moves a calibration may make. |
+| `DILUTION_BAND_HIGH` | `60` | score | dilution_score ≥ this ⇒ band HIGH. |
+| `DILUTION_BAND_MEDIUM` | `35` | score | dilution_score ≥ this ⇒ band MEDIUM. |
+| `PROMO_AMPLIFY_PCT` | `0` | % | Reserved; 0 = disabled. |
+
+### Retention & ops
+| Setting | Default | Unit | Meaning |
+|---|---|---|---|
+| `RAW_RETENTION_DAYS` | `7` | days | Prune raw_payloads / non-qualified per-cycle data. |
+| `DISK_WARN_PCT` | `10` | % | Warn once when free disk falls under this. |
+| `QUIET_HOURS` | (empty) | HH:MM-HH:MM,mode | Optional per-mode quiet hours (none by default). |
+
+### Runtime & shadow clock
+| Setting | Default | Unit | Meaning |
+|---|---|---|---|
+| `SHADOW` | `0` | bool | 1 = decide and log but never push (`rotd shadow`). |
+| `SHADOW_DAYS_REQUIRED` | `10` | trading_days | Shadow-clock length before live pushes allowed. |
+| `SHADOW_AUTOSTART` | `0` | bool | 1 = start the clock on the first shadow cycle. |
+| `SELFTEST` | `0` | bool | 1 = fully offline deterministic mode. |
+| `UNIVERSE_POLL_S` | `30` | s | Universe sweep cadence (mode profile overrides). |
+| `MOVERS_POLL_S` | `20` | s | Mover-screen cadence (mode profile overrides). |
+| `WATCHDOG_STALL_S` | `180` | s | A cycle longer than this trips the watchdog. |
+
+### Per-mode profile (cadence & ignition policy)
+| Mode | `POLL_S` | `ALLOW_IGNITION` |
 |---|---|---|
-| `MAX_PRICE` | `10.00` USD | Universe ceiling (sub-$10). No price floor. |
-| `ALERT_BUDGET_PER_DAY` | `3` | Ignition alerts per day (+1 reserve). |
-| `BOARD_SIZE` | `5` | Top names carried to the board. |
-| `ROTD_MIN_SCORE` | `70` | Rank-1 must clear this to become ROTD. |
-| `SHADOW_DAYS_REQUIRED` | `10` | Trading days before live pushes allowed. |
-| `USE_SPREAD_GATE` / `USE_LIQ_GATE` / `USE_EXIT_GATE` | `0` | Gates needing a book/bar feed; off (VERIFIED G-18). |
+| `PRE` | 15 | yes |
+| `OPEN` | 10 | yes |
+| `MIDDAY` | 30 | yes |
+| `POST` | 30 | yes (spreads loosened 1.5×) |
+| `OVERNIGHT` | 300 | **no** (never ignites on quotes) |
 
 ## Documentation
 
