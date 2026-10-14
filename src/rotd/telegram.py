@@ -159,7 +159,8 @@ class TelegramClient:
                                 {"offset": offset, "timeout": timeout,
                                  "allowed_updates": allowed_updates or ["message", "callback_query"]},
                                 timeout=timeout + 10)
-        except TelegramError:
+        except Exception:  # noqa: BLE001 - any Telegram/network error must not crash
+            # the listener loop; return no updates and let it retry next tick.
             return []
         return result if isinstance(result, list) else []
 

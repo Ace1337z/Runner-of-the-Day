@@ -289,7 +289,10 @@ def cmd_listen(cfg: Config, args: argparse.Namespace) -> int:
     split = max(1, poll_s // 2)  # time for each short poll so total >= poll_s
     log.info("rotd listen: tick %ss; live pushes=%s; cycle runs off-thread",
              poll_s, not cfg.bool("SHADOW"))
-    offset = 0
+    # Resume the Telegram read cursor across restarts so we never re-process old
+    # messages (and never lose our place). systemd Restart=always would otherwise
+    # reset offset=0 on every crash and re-answer history.
+    offset = int(store.get_meta("tg_offset") or 0)
     # Guards the worker-cycle so only one runs at a time (Store is locked, but we
     # avoid piling up cycles that would just contend on the DB).
     cycle_thread: Optional[threading.Thread] = None
@@ -319,22 +322,38 @@ def cmd_listen(cfg: Config, args: argparse.Namespace) -> int:
         return 0
     try:
         while True:
-            # 0. finalize the previous trading day once it has closed (builds the
-            #    runner list + MISS REPORT and pushes it to Telegram).
-            _finalize_if_closed(rt, last_trading_day)
-            # 1. answer commands first (no cycle in front of them)
-            offset = _listen_reply(cfg, store, tg, offset, split)
-            # 2. kick off the cycle on a worker thread
-            maybe_cycle()
-            # 3. keep answering during the cycle window
-            offset = _listen_reply(cfg, store, tg, offset, split)
-            # 4. finish the interval, then apply any /setkey edits
-            time.sleep(max(0.5, poll_s - 2 * split))
-            cfg.reload_if_changed()
+            try:
+                # 0. finalize the previous trading day once it has closed (builds the
+                #    runner list + MISS REPORT and pushes it to Telegram).
+                _finalize_if_closed(rt, last_trading_day)
+                # 1. answer commands first (no cycle in front of them)
+                offset = _listen_reply(cfg, store, tg, offset, split)
+                # 2. kick off the cycle on a worker thread
+                maybe_cycle()
+                # 3. keep answering during the cycle window
+                offset = _listen_reply(cfg, store, tg, offset, split)
+                # 4. finish the interval, then apply any /setkey edits
+                time.sleep(max(0.5, poll_s - 2 * split))
+                cfg.reload_if_changed()
+            except Exception as exc:  # noqa: BLE001 - one bad command or a network
+                # blip must never kill the daemon (that would loop under Restart=always
+                # and look like multi-second reply delays). Log and keep going.
+                log.error("listen: pass failed, continuing: %s", exc)
+                time.sleep(split)
+            else:
+                # Persist the read cursor only after a clean pass.
+                try:
+                    store.set_meta("tg_offset", str(offset))
+                except Exception:  # noqa: BLE001
+                    pass
     except KeyboardInterrupt:  # pragma: no cover
         log.info("rotd listen: interrupted, exiting")
     if cycle_thread is not None:
         cycle_thread.join(timeout=5)
+    try:
+        store.set_meta("tg_offset", str(offset))
+    except Exception:  # noqa: BLE001
+        pass
     store.close()
     return 0
 
@@ -399,7 +418,17 @@ def _listen_reply(cfg, store, tg, offset, wait_s) -> int:
         sender = str((msg.get("chat") or {}).get("id") or "")
         if not text:
             continue
-        reply = tg.handle_command(text, sender, cfg, ctx=ctx)
+        try:
+            reply = tg.handle_command(text, sender, cfg, ctx=ctx)
+        except Exception as exc:  # noqa: BLE001 - a single bad command must not
+            # take down the daemon; ack the update and apologise instead.
+            log.error("listen: command %r failed: %s", text[:40], exc)
+            offset = max(offset, int(upd.get("update_id", 0)) + 1)
+            try:
+                tg.send("⚠️ command error (logged); try /help", chat_id=sender or None)
+            except Exception:  # noqa: BLE001
+                pass
+            continue
         if reply is not None:
             # Show "typing" for a beat, then send — feels responsive on slow cycles.
             try:
