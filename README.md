@@ -290,6 +290,27 @@ candidates:
 ```
 Changes apply on the next cycle (the `listen` loop reloads `config.env`).
 
+### Slash-command menu
+
+Telegram's `/` autocomplete is **per bot token**, not per process — so a sibling
+system sharing the same token (e.g. `penny-early-warning`) will show its commands
+unless ROTD claims the menu. ROTD re-asserts its own menu:
+
+- **at startup** (once per `listen` run), and
+- **on every `/start`** (so a menu clobbered by the sibling self-heals).
+
+Command names are sanitized to Bot API rules (single-word, lowercase); a single
+invalid name makes the whole `setMyCommands` call fail silently, which is how the
+sibling's menu can otherwise win. To inspect or force it:
+
+```bash
+rotd telegram-menu --show          # what Telegram currently advertises
+rotd telegram-menu --show --check  # exit non-zero if it differs from ROTD's
+rotd telegram-menu                 # publish ROTD's commands now
+```
+
+`rotd telegram-check` also claims the menu during install (`--no-menu` to skip).
+
 ## Complete profile
 
 Every threshold is a **named setting** in `config.py` with a unit, a starting

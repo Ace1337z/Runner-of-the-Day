@@ -293,6 +293,9 @@ def cmd_listen(cfg: Config, args: argparse.Namespace) -> int:
     # messages (and never lose our place). systemd Restart=always would otherwise
     # reset offset=0 on every crash and re-answer history.
     offset = int(store.get_meta("tg_offset") or 0)
+    # Claim the slash-command menu once at startup so a shared bot token does not
+    # keep showing a sibling system's commands. Re-asserted on /start too.
+    _assert_menu(cfg, tg)
     # Guards the worker-cycle so only one runs at a time (Store is locked, but we
     # avoid piling up cycles that would just contend on the DB).
     cycle_thread: Optional[threading.Thread] = None
@@ -356,6 +359,25 @@ def cmd_listen(cfg: Config, args: argparse.Namespace) -> int:
         pass
     store.close()
     return 0
+
+
+def _assert_menu(cfg, tg) -> None:
+    """Publish ROTD's slash menu, replacing any sibling bot's commands.
+
+    Only meaningful for the real client. Failures are cosmetic (menu only), so
+    they are logged and never raised — the daemon keeps listening regardless.
+    """
+    from .telegram import menu_commands
+    if isinstance(tg, FakeTelegram):
+        return
+    try:
+        cmds = menu_commands()
+        if tg.set_commands(cmds):
+            log.info("listen: published ROTD slash menu (%d commands)", len(cmds))
+        else:
+            log.warning("listen: could not publish the slash menu")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("listen: slash menu update failed: %s", exc)
 
 
 def _safe_cycle(rt: "Runtime", mode: str, day: "date") -> None:
@@ -648,6 +670,47 @@ def cmd_telegram_check(cfg: Config, args: argparse.Namespace) -> int:
         return 2
     ok, msg = tg.health()
     print(f"telegram (live): {'OK' if ok else 'FAIL'} — {msg}")
+    if ok and not getattr(args, "no_menu", False):
+        # Claim the slash menu now, so a shared bot does not keep showing a
+        # sibling system's commands after install.
+        from .telegram import menu_commands
+        published = tg.set_commands(menu_commands())
+        print(f"telegram menu:  {'published ROTD commands' if published else 'FAILED to publish'}")
+    return 0 if ok else 1
+
+
+def cmd_telegram_menu(cfg: Config, args: argparse.Namespace) -> int:
+    """Publish (or show) the bot's slash-command menu without touching anything else.
+
+    ``--show`` prints what Telegram currently advertises — useful to confirm
+    whether a sibling system (e.g. penny-early-warning on the same token) still
+    owns the menu.
+    """
+    tg = _real_telegram(cfg)
+    if tg is None:
+        print("TELEGRAM_TOKEN not set — cannot manage the menu.")
+        return 2
+    from .telegram import menu_commands
+    if getattr(args, "show", False):
+        current = tg.get_commands()
+        if not current:
+            print("telegram menu: (empty — nothing advertised)")
+        else:
+            print("telegram menu (current):")
+            for name, desc in current:
+                print(f"  /{name:<14} {desc}")
+        if getattr(args, "check", False):
+            expected = {n for n, _ in menu_commands()}
+            have = {n for n, _ in current}
+            if have == expected:
+                print("menu matches ROTD commands.")
+                return 0
+            print(f"menu differs — missing {sorted(expected - have)}, "
+                  f"extra {sorted(have - expected)}")
+            return 1
+        return 0
+    ok = tg.set_commands(menu_commands())
+    print(f"telegram menu: {'published ROTD commands' if ok else 'FAILED to publish'}")
     return 0 if ok else 1
 
 
@@ -728,7 +791,17 @@ def build_parser() -> argparse.ArgumentParser:
     dc.set_defaults(func=cmd_detect_chat)
 
     tc = sub.add_parser("telegram-check", help="verify the REAL bot token via getMe (live, no fake)")
+    tc.add_argument("--no-menu", action="store_true",
+                    help="skip claiming the slash-command menu")
     tc.set_defaults(func=cmd_telegram_check)
+
+    tm = sub.add_parser("telegram-menu",
+                        help="publish or inspect the bot's slash-command menu")
+    tm.add_argument("--show", action="store_true",
+                    help="show what Telegram currently advertises")
+    tm.add_argument("--check", action="store_true",
+                    help="with --show, exit non-zero if the menu differs from ROTD's")
+    tm.set_defaults(func=cmd_telegram_menu)
 
     p.add_argument("--version", action="version", version=f"rotd {__version__}")
     return p

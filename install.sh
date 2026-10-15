@@ -162,6 +162,7 @@ fi
 info "checking the bot token against the real Telegram API (getMe)..."
 "$ROTD" --config "$CONFIG_FILE" telegram-check || \
     fail "the Telegram bot token is invalid or unreachable. Check it at @BotFather and re-run install.sh."
+info "(that also publishes ROTD's slash-command menu, replacing any sibling bot's)"
 if [[ -z "${TELEGRAM_CHAT_ID:-}" && "$HAS_TTY" == "1" ]]; then
     info "no chat id yet — message your bot now so we can auto-detect it..."
     "$ROTD" --config "$CONFIG_FILE" detect-chat || \

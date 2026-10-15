@@ -10,6 +10,7 @@ Commands are accepted only from the configured chat id (§14.2).
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any, Iterable, Optional
 
@@ -143,12 +144,22 @@ class TelegramClient:
 
     def set_commands(self, commands: Iterable[tuple[str, str]]) -> bool:
         try:
-            self._call("setMyCommands", {
-                "commands": [{"command": c.lstrip("/"), "description": d}
-                             for c, d in commands][:100]})
+            payload = _menu_payload(commands)
+            if not payload:
+                return False
+            self._call("setMyCommands", {"commands": payload})
             return True
         except TelegramError:
             return False
+
+    def get_commands(self) -> list[tuple[str, str]]:
+        """The menu Telegram currently advertises for this bot (or [])."""
+        try:
+            result = self._call("getMyCommands", {})
+            return [(row.get("command", ""), row.get("description", ""))
+                    for row in (result or [])]
+        except Exception:  # noqa: BLE001
+            return []
 
     def get_updates(self, offset: int = 0, timeout: int = 25,
                     allowed_updates: Optional[list[str]] = None) -> list[dict]:
@@ -226,7 +237,50 @@ COMMANDS = (
 
 
 def _usage() -> str:
-    return "ROTD commands:\n" + "\n".join(f"  {c[0]:<20} {c[1]}" for c in COMMANDS)
+    return ("ROTD commands:\n"
+            + "\n".join(f"  {c[0]:<20} {c[1]}" for c in COMMANDS))
+
+
+def menu_commands() -> list[tuple[str, str]]:
+    """The slash menu Telegram should show, sanitized to Bot API rules.
+
+    Telegram requires a single-word, lowercase command name (<=32 chars, no
+    spaces) and a description <=256 chars. One invalid entry makes the whole
+    ``setMyCommands`` call fail silently, which is exactly how a sibling bot
+    sharing the same token can leave its own menu in place. Entries like
+    ``/setkey KEY VALUE`` are therefore published as ``setkey`` with the usage
+    folded into the description.
+    """
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for raw_name, raw_desc in COMMANDS:
+        parts = raw_name.lstrip("/").split()
+        name = parts[0].split("@")[0].lower() if parts else ""
+        name = re.sub(r"[^a-z0-9_]", "", name)[:32]
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        extra = " ".join(parts[1:]).strip()
+        # Fold a usage argument (e.g. "KEY VALUE") into the description, once.
+        desc = raw_desc
+        if extra and extra.lower() not in desc.lower():
+            desc = f"{desc} — {extra}"
+        out.append((name, re.sub(r"\s+", " ", desc).strip()[:256] or "ROTD command"))
+    return out
+
+
+def _menu_payload(commands) -> list[dict]:
+    """Sanitize (name, description) pairs into Telegram ``setMyCommands`` rows."""
+    payload = []
+    for raw_name, raw_desc in list(commands)[:100]:
+        parts = str(raw_name).lstrip("/").split()
+        name = parts[0].split("@")[0].lower() if parts else ""
+        name = re.sub(r"[^a-z0-9_]", "", name)[:32]
+        if not name:
+            continue
+        desc = re.sub(r"\s+", " ", str(raw_desc)).strip()[:256] or "ROTD command"
+        payload.append({"command": name, "description": desc})
+    return payload
 
 
 def handle_command(self, text: str, sender_chat: str, cfg: "Config",
@@ -249,6 +303,13 @@ def handle_command(self, text: str, sender_chat: str, cfg: "Config",
     arg = " ".join(parts[1:]).strip()
 
     if name in ("start", "help"):
+        # Self-heal the slash menu: the bot token is shared with a sibling system,
+        # so whichever process last called setMyCommands owns the menu. Re-assert
+        # ROTD's menu on every /start so penny's entries lose the fight for good.
+        try:
+            self.set_commands(menu_commands())
+        except Exception:  # noqa: BLE001 - menu is cosmetic; never block the reply
+            pass
         return ("ROTD — Runner of the Day. Watching the sub-$10 universe.\n"
                 + _usage()
                 + "\n\nSet a key any time, e.g. /setkey FINVIZ_TOKEN <token>")
@@ -460,6 +521,9 @@ class FakeTelegram:
     def set_commands(self, commands) -> bool:
         self.menu = list(commands)
         return True
+
+    def get_commands(self) -> list[tuple[str, str]]:
+        return list(self.menu)
 
     def get_updates(self, offset: int = 0, timeout: int = 25,
                     allowed_updates: Optional[list[str]] = None) -> list[dict]:
