@@ -257,6 +257,24 @@ def probe_alpaca_auth_diag() -> None:
 PROBES["alpaca_diag"] = probe_alpaca_auth_diag
 
 
+def probe_tradingview() -> None:
+    """Keyless capture of the scanner POST (resolves the PENDING verification).
+
+    Saves the raw JSON so the column mapping in sources/tradingview.py can be
+    checked against reality before those fields are trusted. No token needed.
+    """
+    body = {
+        "filter": [{"left": "name", "operation": "in_range", "right": ["AAPL", "ZVZZT"]}],
+        "columns": ["name", "close", "change", "volume"],
+        "range": [0, 2],
+    }
+    st, text = _post_json("https://scanner.tradingview.com/america/scan", body)
+    save("tradingview_scan", st, text, extra={"columns": body["columns"]})
+
+
+PROBES["tradingview"] = probe_tradingview
+
+
 def main(argv: list[str]) -> int:
     names = argv[1:] or list(PROBES)
     for n in names:

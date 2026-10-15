@@ -11,6 +11,8 @@ Source roles (docs/VERIFIED.md §G, docs/DECISIONS.md):
 - **finnhub** — quote, news and the session detector (no candles: 403).
 - **alpha_vantage** — free ``GLOBAL_QUOTE`` only.
 - **yahoo** — last-resort chart/bars/regime.
+- **tradingview** — keyless batch freshness quote (price/volume only; pending
+  fixture verification, guarded in runtime).
 - **sec** — filings + ticker->CIK map.
 - **finra** — short-sale volume and short interest.
 - **alpaca** — optional candle fallback, **BLOCKED** (key rejected).
@@ -27,6 +29,7 @@ from .finnhub import FinnhubClient
 from .finra import FinraClient
 from .finviz import FinvizClient, FinvizTokenRejected
 from .sec import SecClient
+from .tradingview import TradingViewClient
 from .twelvedata import TwelveDataClient
 from .yahoo import YahooClient
 
@@ -34,7 +37,7 @@ __all__ = [
     "BaseClient", "SourceError", "fnum", "parse_csv",
     "AlphaVantageClient", "AlpacaClient", "AlpacaBlocked",
     "FinnhubClient", "FinraClient", "FinvizClient", "FinvizTokenRejected",
-    "SecClient", "TwelveDataClient", "YahooClient",
+    "SecClient", "TwelveDataClient", "TradingViewClient", "YahooClient",
     "build_clients", "SOURCE_CLASSES",
 ]
 
@@ -47,6 +50,7 @@ SOURCE_CLASSES = {
     "sec": SecClient,
     "finra": FinraClient,
     "alpaca": AlpacaClient,
+    "tradingview": TradingViewClient,
 }
 
 

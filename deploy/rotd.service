@@ -6,7 +6,7 @@ Wants=network-online.target
 # Start-limit settings live in [Unit] (modern systemd rejects them in [Service]):
 # panic-stop a crash loop after 3 restarts within 60s instead of restarting forever.
 StartLimitIntervalSec=60
-StartLimitIntervalBurst=3
+StartLimitBurst=3
 
 [Service]
 Type=simple

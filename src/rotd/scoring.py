@@ -92,8 +92,11 @@ def score_candidate(rec: Canonical, fs: FeatureSet, gates: GateReport, cfg: Conf
     fuel_parts = []
     fl = fs.value("float_shares")
     if fl is not None:
-        # Lower float => higher fuel (5M shares or less is prime).
-        fuel_parts.append(clamp(1.0 - (fl - 1e6) / (50e6 - 1e6), 0.0, 1.0))
+        # Feature adapters normally normalize float to shares; Finviz-origin values
+        # may be in millions. Treat plausible small magnitudes as millions, then
+        # score relative to the methodology's 1M..50M range.
+        fl_m = fl if fl < 100_000 else fl / 1e6
+        fuel_parts.append(clamp(1.0 - (fl_m - 1.0) / (50.0 - 1.0), 0.0, 1.0))
     sf = fs.value("short_float_pct")
     if sf is not None:
         fuel_parts.append(_lin(sf, 5.0, 30.0))
@@ -135,10 +138,18 @@ def score_candidate(rec: Canonical, fs: FeatureSet, gates: GateReport, cfg: Conf
                                          "" if raw is not None else "MISSING")
         total += points
 
+    # Missing optional components (especially catalyst when running rules-only)
+    # must not cap an otherwise complete score. Normalize against only active
+    # component weights so the result remains on a 0..100 scale. The breakdown
+    # preserves raw weighted points for auditability; Scored.score is normalized.
+    active_weight = sum(W[k] for k in raw_by if raw_by[k] is not None and W[k] > 0)
+    score = (clamp(total * (100.0 / active_weight), 0.0, 100.0)
+             if active_weight > 0 else 0.0)
+
     # Tiebreak: higher liquidity first, then a stable symbol order.
     liq = fs.value("dollar_volume_15m") or (rec.dollar_volume or 0.0)
     tiebreak = (-round(liq, 2), rec.symbol)
-    return Scored(symbol=rec.symbol, score=total, components=components, tiebreak=tiebreak)
+    return Scored(symbol=rec.symbol, score=score, components=components, tiebreak=tiebreak)
 
 
 @dataclass

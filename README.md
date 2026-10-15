@@ -486,10 +486,38 @@ reversible and every step stores a reason.
 ROTD owns a fresh, forked source layer in `src/rotd/sources/` (no dependency on
 the `penny` package, and `penny-early-warning` is never edited). Current
 adapters: **Finviz** (universe, movers, quote rows, news, filings, extended-hours
-price), **TwelveData** (regular-session 1-min bars + quote), **Finnhub** (quote +
+price), **TwelveData** (regular-session 1-min bars + quote), **TradingView
+scanner** (keyless batch freshness quote — see below), **Finnhub** (quote +
 market status), **Alpha Vantage** (global quote), **Yahoo** (chart), **SEC EDGAR**
 (Atom), **FINRA** (RegSHO + consolidated short interest). Telegram delivery uses
 `FakeTelegram` by default; live sends are wired but require a bot token.
+
+### Keyless batch freshness (TradingView scanner)
+
+The TwelveData free tier allows ~8 credits/min, so polling fresh quotes per cycle
+throttles on an active day. `sources/tradingview.py` issues **one keyless POST** to
+`scanner.tradingview.com/america/scan` per cycle that returns price/change/volume
+for the whole tracked pool, with the paced TwelveData quote kept as a fallback.
+
+Guard rails (this feed is treated as an unverified hint, not a decision input):
+
+- **Verification is PENDING.** Capture the raw response with
+  `python probes/probe_sources.py tradingview`; the column mapping is only trusted
+  after the fixture is checked. Unknown columns are never added — the adapter
+  requests the minimal set `name, close, change, volume`.
+- **No 15-minute aggregates, no float.** `close|15`/`volume|15`/`Value.Traded|15`
+  would be a 15-minute print feed (VERIFIED G-18 — still not in the decision path)
+  and `float_shares_outstanding` is not a verified mapping; Finviz owns float
+  (G-17). These fields are deliberately not requested.
+- **Regular session only** (`OPEN`/`MIDDAY`). Extended-hours truth stays with
+  Finviz, the only verified extended-hours source.
+- **Deviation cap.** A scanner price more than `TRADINGVIEW_MAX_DEVIATION_PCT`
+  (default 20%) off the reconciled Finviz price is dropped; conflicts never enter
+  the snapshot. Any HTTP/parse failure falls back to TwelveData, then to the
+  Finviz price.
+
+Disable with `TRADINGVIEW_ENABLED=0`. It never re-arms G-18 gates: no bid/ask book
+appears anywhere, so `G-SPREAD`/`G-LIQ`/`G-EXIT` remain `NOT_ENFORCED`.
 
 ## Testing & verification
 

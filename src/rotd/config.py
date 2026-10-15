@@ -107,7 +107,7 @@ _GLOBAL: list[Setting] = [
 
     # --- ranking / board (section 9.2) ---
     Setting("BOARD_SIZE", "5", "names", "BOARD = the top 5 qualified candidates."),
-    Setting("ROTD_MIN_SCORE", "70", "points",
+    Setting("ROTD_MIN_SCORE", "60", "points",
             "Rank 1 is only ROTD if its score is at least this (else 'no qualified runner')."),
 
     # --- state machine / hysteresis (section 11.1) ---
@@ -115,7 +115,7 @@ _GLOBAL: list[Setting] = [
     Setting("BOARD_MIN_DWELL_S", "60", "s", "Must stay top-5 this long to hold BOARD (hysteresis)."),
     Setting("BOARD_EXIT_RANK", "8", "rank", "Leaves BOARD only below this rank (hysteresis)."),
     Setting("ARM_MAX_RANK", "2", "rank", "ARMED requires rank <= this."),
-    Setting("ARM_MIN_SCORE", "75", "points", "ARMED requires score >= this."),
+    Setting("ARM_MIN_SCORE", "63", "points", "ARMED requires score >= this."),
     Setting("CHASE_CAP_PCT", "4.0", "%", "No ignition if price is >this% above the armed level."),
     Setting("EXT_CONFIRM_BARS", "2", "bars", "POST/PRE need this many confirming extended bars."),
     Setting("REG_CONFIRM_BARS", "1", "bars", "Regular hours need this many confirming bars."),
@@ -161,6 +161,10 @@ _GLOBAL: list[Setting] = [
     Setting("QUOTE_CACHE_TTL_S", "60", "s", "Reuse a successful per-symbol quote within this window instead of re-fetching."),
     Setting("TWELVEDATA_MIN_INTERVAL_S", "8", "s", "Minimum spacing between TwelveData quote requests (~7.5/min, within the free-tier 8-credit/min budget)."),
     Setting("SOURCE_COOLDOWN_S", "60", "s", "After an HTTP 429 a source is put on cooldown for this long before its next call."),
+    Setting("TRADINGVIEW_ENABLED", "1", "bool", "Use the keyless TradingView scanner for batch freshness quotes; falls back to paced TwelveData when off/unavailable."),
+    Setting("TRADINGVIEW_TIMEOUT_S", "10", "s", "HTTP timeout for one batch scanner POST."),
+    Setting("TRADINGVIEW_CACHE_TTL_S", "10", "s", "Reuse one batch scanner result for this window (at most one POST per cycle)."),
+    Setting("TRADINGVIEW_MAX_DEVIATION_PCT", "20", "%", "Drop a scanner price that deviates from the reconciled Finviz price by more than this (unverified feed stays out of the decision path)."),
 
     # --- discovery (section 6) ---
     Setting("CARRY_LOOKBACK_D", "90", "days", "Carry-list 'recent runner history' window (§6.4)."),

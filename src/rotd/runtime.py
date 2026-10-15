@@ -100,19 +100,52 @@ class Runtime:
             log.warning("universe fetch failed: %s", exc)
             return [], {"finviz": {"ok": False, "error": str(exc)[:120]}}
 
-    def _fresh_points(self, symbols: list[str], now: datetime) -> dict[str, list[PricePoint]]:
-        """A fresher quote for tracked symbols, if a feed is available.
+    def _fresh_points(self, symbols: list[str], now: datetime,
+                      reference: Optional[dict[str, float]] = None,
+                      mode: str = "") -> dict[str, list[PricePoint]]:
+        """Fresher quotes for tracked symbols, if a feed is available.
 
-        Rate-aware: at most the cached-or-one-new quote per cycle, rotating through the
-        board so every name is refreshed over time. Failures (429, cooldown, local
-        throttle) fall back silently to the Finviz price — logged once per cooldown.
+        Preferred: one keyless TradingView batch POST covers the whole pool
+        (no free-tier throttling), regular session only, and every price is kept
+        only while it stays within ``TRADINGVIEW_MAX_DEVIATION_PCT`` of the
+        reconciled Finviz price — an unverified feed must not enter the decision
+        path on its own. Fallback: the paced, cached TwelveData quote. Any
+        throttle/429/cooldown falls back silently to the Finviz price.
         """
         td = self.clients.get("twelvedata")
-        if td is None or not self.cfg.raw("TWELVEDATA_KEY"):
-            return {}
+        tv = self.clients.get("tradingview")
+        ref = reference or {}
         out: dict[str, list[PricePoint]] = {}
         pool = symbols[:self.cfg.int("BOARD_SIZE", 5) * 4]
         if not pool:
+            return out
+
+        if tv is not None and self.cfg.bool("TRADINGVIEW_ENABLED", True):
+            try:
+                batch = tv.fetch_batch_metrics(pool)
+            except Exception as exc:  # noqa: BLE001 - fail soft to TwelveData
+                log.debug("tradingview batch unavailable: %s", exc)
+                batch = {}
+            if batch:
+                # Scanner "close" is regular-session truth; extended hours stay
+                # with Finviz (the only verified extended-hours source).
+                if mode in ("OPEN", "MIDDAY"):
+                    cap = float(self.cfg.float("TRADINGVIEW_MAX_DEVIATION_PCT", 20))
+                    for sym, m in batch.items():
+                        px = m.get("close")
+                        if px is None:
+                            continue
+                        base = ref.get(sym)
+                        if base and abs(px - base) / base * 100.0 > cap:
+                            log.debug("tradingview: dropping %s (%.3f vs finviz %.3f)",
+                                      sym, px, base)
+                            continue
+                        out[sym] = [PricePoint(source="tradingview", price=px, ts=now,
+                                               scope="UNKNOWN", volume=m.get("volume"))]
+                if out:
+                    return out  # one batch covers the pool; skip TwelveData
+
+        if td is None or not self.cfg.raw("TWELVEDATA_KEY"):
             return out
         start = self._fresh_cursor % len(pool)
         ordered = pool[start:] + pool[:start]
@@ -148,7 +181,9 @@ class Runtime:
         # Names worth a fresh quote: the previous board plus any with big moves.
         movers = sorted(rows, key=lambda r: abs(r.get("change_pct") or 0), reverse=True)
         tracked = [r["symbol"] for r in movers[:40]]
-        fresh = self._fresh_points(tracked, now)
+        reference = {(r.get("symbol") or "").upper(): r.get("price") for r in rows
+                     if r.get("price")}
+        fresh = self._fresh_points(tracked, now, reference=reference, mode=mode)
 
         snap = snapshot_from_finviz_rows(rows, self.cfg, mode, day,
                                          extra_points=fresh, source_health=health,
@@ -173,11 +208,6 @@ class Runtime:
                                   history=self._history.get(sym),
                                   mode_age_min=age)
             rep = run_gates(rec, fs, self.cfg, mode, snap)
-            self.store.save_candidate(day, mode, now, sym,
-                                      None, None, rep.passed, rep.as_dict(),
-                                      fs.as_dict(),
-                                      "" if rep.passed else (rep.first_failure.reason
-                                                             if rep.first_failure else ""))
             gates_by[sym] = rep
             features_by[sym] = fs
             if rep.passed:
@@ -188,6 +218,18 @@ class Runtime:
                 gate_failures[sym] = rep.summary()
 
         rk = rank(scored, self.cfg)
+        # Persist candidates only after scoring/ranking so the DB reflects the
+        # actual score and rank for passed candidates. Gated-out candidates remain
+        # recorded with NULL score/rank and their first failing gate reason.
+        for sym, rep in gates_by.items():
+            fs = features_by[sym]
+            sc = scored_by.get(sym)
+            self.store.save_candidate(
+                day, mode, now, sym,
+                round(sc.score, 2) if sc else None,
+                sc.rank if sc else None,
+                rep.passed, rep.as_dict(), fs.as_dict(),
+                "" if rep.passed else (rep.first_failure.reason if rep.first_failure else ""))
 
         # methodology_v3 audit (§10): off the decision path, never gates an alert.
         audit = self._audit_candidates(day, mode, now, rk, snap, scored_by,
