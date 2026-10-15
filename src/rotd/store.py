@@ -53,6 +53,8 @@ CREATE TABLE IF NOT EXISTS snapshots (
     n_symbols     INTEGER NOT NULL DEFAULT 0,
     UNIQUE(trading_day, mode, cycle_ts)
 );
+-- latest_snapshot(): newest cycle for a day.
+CREATE INDEX IF NOT EXISTS idx_snap_day_ts ON snapshots(trading_day, cycle_ts DESC);
 
 CREATE TABLE IF NOT EXISTS candidates (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,6 +71,8 @@ CREATE TABLE IF NOT EXISTS candidates (
     UNIQUE(trading_day, mode, cycle_ts, symbol)
 );
 CREATE INDEX IF NOT EXISTS idx_cand_day_sym ON candidates(trading_day, symbol);
+-- Panel query shape (/board, /status): latest cycle for a day, then rank order.
+CREATE INDEX IF NOT EXISTS idx_cand_day_ts_rank ON candidates(trading_day, cycle_ts DESC, rank);
 
 CREATE TABLE IF NOT EXISTS decisions (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -189,7 +193,11 @@ class Store:
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # WAL: the listen daemon writes on a worker thread while Telegram reads on
+        # the main thread — WAL keeps readers from blocking the writer. NORMAL is
+        # durable enough here (a crash loses at most the last commit, not the DB).
         self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(SCHEMA)
         self._conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)",
