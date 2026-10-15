@@ -421,6 +421,13 @@ fails **any enforced** gate is not scored and cannot alert.
 Ladder: `WATCH → QUALIFIED → BOARD → ARMED → IGNITION`. Transitions are
 reversible and every step stores a reason.
 
+**Fail-closed arming.** ARMED means "top name *right now*". While a name waits for
+its confirmation bars, rank (`≤ ARM_MAX_RANK`) and score (`≥ ARM_MIN_SCORE`) are
+re-checked every cycle. If either slips — it loses the top rank to a competitor, or
+its score falls during confirmation — it steps back down (to `BOARD`, or
+`QUALIFIED` if it also left the board) and its confirmation counter resets, so it
+cannot ignite on stale strength. Re-arming starts the confirmation window over.
+
 ### Alert budget (scarcity)
 | Setting | Default | Unit | Meaning |
 |---|---|---|---|

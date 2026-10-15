@@ -12,7 +12,10 @@ plus terminal/transient ``ABORT``, ``DEGRADED``, ``RECOVERED``, and
   below ``BOARD_EXIT_RANK`` and to have held BOARD at least ``BOARD_MIN_DWELL_S``.
 - ARMED needs rank <= ``ARM_MAX_RANK`` and score >= ``ARM_MIN_SCORE``.
 - IGNITION needs a confirmed bar cross and price within ``CHASE_CAP_PCT`` of the
-  armed level (no chasing an extended move).
+  armed level (no chasing an extended move). **Fail closed:** while a name sits in
+  ARMED waiting for confirmation, rank and score are re-validated every cycle; if
+  either slips it steps back down (to BOARD, or QUALIFIED off the board) and its
+  confirmation counter resets, so it can never ignite on stale strength.
 
 Alert budget (§11.2): at most ``ALERT_BUDGET_PER_DAY`` IGNITION pushes per trading
 day, plus ``RESERVE_SLOTS`` for a candidate scoring at/above
@@ -63,6 +66,8 @@ R_ARM = "ARM_RANK_AND_SCORE"
 R_ARM_CHASE = "ARM_CHASE_CAP"
 R_ARM_RANK = "ARM_RANK_TOO_LOW"
 R_ARM_SCORE = "ARM_SCORE_TOO_LOW"
+R_ARM_STEP_RANK = "ARM_STEP_DOWN_RANK"
+R_ARM_STEP_SCORE = "ARM_STEP_DOWN_SCORE"
 R_IGNITE = "IGNITION_CONFIRMED"
 R_IGNITE_BUDGET = "IGNITION_BUDGET_EXHAUSTED"
 R_IGNITE_DUP = "IGNITION_ALREADY_TODAY"
@@ -224,6 +229,7 @@ class StateMachine:
                 if prev in (State.QUALIFIED, State.BOARD, State.ARMED):
                     out.append(self._move(st, State.WATCH, R_DROP, "failed gates"))
                     st.consecutive_qualified = 0
+                    st.confirm_bars = 0
                 continue
 
             # --- WATCH -> QUALIFIED (consecutive fully-gated cycles) ---
@@ -278,12 +284,34 @@ class StateMachine:
                     price = getattr(rec, "price", None)
                 st.armed_level = price
                 st.armed_at = now
+                st.confirm_bars = 0  # fresh confirmation window on every re-arm
                 out.append(self._move(st, State.ARMED, R_ARM,
                                       f"rank {rank}, score {score:.1f}"))
                 prev = st.state
 
             # --- ARMED -> IGNITION ---
             if prev == State.ARMED:
+                # FAIL CLOSED: re-validate the arm criteria every cycle while the
+                # name waits for confirmation. ARMED is a promise ("this is a top
+                # name right now"); if rank or score slips during the confirmation
+                # window, the promise is gone and we must step down instead of
+                # blindly confirming on stale strength. Checked BEFORE the chase
+                # cap and the confirm-bar counter so a demoted name never accrues
+                # confirmation toward an ignition it no longer deserves.
+                rank = rank_of.get(sym, 999)
+                score = score_of.get(sym, 0.0)
+                if rank > self.cfg.int("ARM_MAX_RANK", 2):
+                    st.confirm_bars = 0
+                    back = State.BOARD if sym in board_syms else State.QUALIFIED
+                    out.append(self._move(st, back, R_ARM_STEP_RANK, f"rank {rank}"))
+                    prev = st.state
+                    continue
+                if score < self.cfg.float("ARM_MIN_SCORE", 75):
+                    st.confirm_bars = 0
+                    back = State.BOARD if sym in board_syms else State.QUALIFIED
+                    out.append(self._move(st, back, R_ARM_STEP_SCORE, f"score {score:.1f}"))
+                    prev = st.state
+                    continue
                 price = prices.get(sym) or (getattr(rec, "price", None) if rec else None)
                 armed = st.armed_level
                 # Chase cap: never ignite far above the armed level.
@@ -306,7 +334,6 @@ class StateMachine:
                     out.append(Transition(sym, prev, State.ARMED, R_IGNITE_PHASE, mode))
                     continue
                 # Budget.
-                score = score_of.get(sym, 0.0)
                 ok, why = self.budget.can_spend(score, self.cfg, sym, now)
                 if not ok:
                     out.append(Transition(sym, prev, State.ARMED, why, f"budget {self.budget.used}/{self.budget.limit}"))
