@@ -29,7 +29,8 @@ def _runner(symbol="EXMP", price=2.31, prev=1.90, **kw) -> Canonical:
                 volume=3_000_000, volume_basis="SINGLE_VENUE", bid=price - 0.01,
                 ask=price + 0.01, spread_pct=0.9, day_high=price * 1.04,
                 day_low=1.98, shares_float=4_000_000, short_float=22.0,
-                company="Exemplar Inc", data_grade="A", fetched_at=now)
+                market_cap=9_240_000, company="Exemplar Inc", data_grade="A",
+                fetched_at=now)
     base.update(kw)
     return Canonical(**base)
 
@@ -88,7 +89,7 @@ def test_data_conflict_and_stale_fail_closed(cfg: Config):
                                 PricePoint("twelvedata", 2.005, now)], cfg, "OPEN", now=now)
     assert ok.price is not None
     bad = reconcile_symbol("T", [PricePoint("finviz", 2.00, now, scope="SINGLE_VENUE"),
-                                 PricePoint("twelvedata", 2.60, now)], cfg, "OPEN", now=now)
+                                 PricePoint("twelvedata", 4.20, now)], cfg, "OPEN", now=now)
     assert R_CONFLICT in bad.reasons
     stale = reconcile_symbol("T", [PricePoint("finviz", 2.0, now - timedelta(seconds=9999),
                                               scope="SINGLE_VENUE")], cfg, "OPEN", now=now)
@@ -124,7 +125,8 @@ def test_spread_liquidity_exit_gates_not_enforced_by_default(cfg: Config):
     # silently zero the universe.
     now = datetime(2026, 10, 13, 14, 0, tzinfo=UTC)
     rec = Canonical(symbol="X", price=2.0, prev_close=1.0, volume=1e6,
-                    volume_basis="SINGLE_VENUE", data_grade="A", fetched_at=now)
+                    volume_basis="SINGLE_VENUE", market_cap=2_000_000,
+                    data_grade="A", fetched_at=now)
     snap = _snap([rec])
     fs = compute_features(rec, cfg, snap)
     rep = run_gates(rec, fs, cfg, "OPEN", snap)
@@ -135,13 +137,29 @@ def test_spread_liquidity_exit_gates_not_enforced_by_default(cfg: Config):
     assert rep.passed
 
 
-def test_gates_reject_above_price_ceiling(cfg: Config):
-    rec = _runner(price=11.0, prev=9.0)
-    snap = _snap([rec])
-    fs = compute_features(rec, cfg, snap)
-    rep = run_gates(rec, fs, cfg, "OPEN", snap)
-    assert not rep.passed
-    assert any(g.gate == "G-PRICE" and not g.passed for g in rep.results)
+def test_gates_reject_above_market_cap_ceiling(cfg: Config):
+    # Upgrade 6: the universe scope is a $100M market cap, not a share price.
+    # A high-priced micro-cap with a small cap passes; one above the cap fails;
+    # an unknown market cap fails closed.
+    ok = _runner(price=25.0, prev=20.0, market_cap=80_000_000)
+    snap = _snap([ok])
+    fs = compute_features(ok, cfg, snap)
+    rep = run_gates(ok, fs, cfg, "OPEN", snap)
+    assert rep.passed, rep.summary()
+
+    big = _runner(price=2.0, prev=1.5, market_cap=150_000_000)
+    snap2 = _snap([big])
+    fs2 = compute_features(big, cfg, snap2)
+    rep2 = run_gates(big, fs2, cfg, "OPEN", snap2)
+    assert not rep2.passed
+    assert any(g.gate == "G-PRICE" and not g.passed for g in rep2.results)
+
+    unknown = _runner(price=2.0, prev=1.5, market_cap=None)
+    snap3 = _snap([unknown])
+    fs3 = compute_features(unknown, cfg, snap3)
+    rep3 = run_gates(unknown, fs3, cfg, "OPEN", snap3)
+    assert not rep3.passed
+    assert any(g.gate == "G-PRICE" and not g.passed for g in rep3.results)
 
 
 # --- scoring / ranking / ROTD ---------------------------------------------

@@ -82,6 +82,13 @@ def score_candidate(rec: Canonical, fs: FeatureSet, gates: GateReport, cfg: Conf
         _lin(fs.value("accel_5m"), 1.0, 10.0),
         _lin(fs.value("vwap_dist"), 0.5, 8.0),
     ]
+    # Short-term volume velocity (Upgrade 1): recent 10m dollar volume rewards a
+    # stock trading RIGHT NOW and punishes a dead-afternoon name that spiked at
+    # the open. MISSING (no history yet) is excluded from the average, so it never
+    # drags a fresh candidate down.
+    dvol10 = fs.value("dollar_volume_10m")
+    if dvol10 is not None:
+        tape_parts.append(_lin(dvol10, 100_000.0, 5_000_000.0))
     present = [p for p in tape_parts if p is not None]
     tape = sum(present) / len(present) if present else None
 

@@ -317,7 +317,7 @@ def cmd_listen(cfg: Config, args: argparse.Namespace) -> int:
         cycle_thread.start()
 
     if getattr(args, "once", False):
-        offset = _listen_reply(cfg, store, tg, offset, split)
+        offset = _listen_reply(cfg, store, tg, offset, split, rt=rt)
         maybe_cycle()
         if cycle_thread is not None:
             cycle_thread.join(timeout=max(2, poll_s))
@@ -330,11 +330,11 @@ def cmd_listen(cfg: Config, args: argparse.Namespace) -> int:
                 #    runner list + MISS REPORT and pushes it to Telegram).
                 _finalize_if_closed(rt, last_trading_day)
                 # 1. answer commands first (no cycle in front of them)
-                offset = _listen_reply(cfg, store, tg, offset, split)
+                offset = _listen_reply(cfg, store, tg, offset, split, rt=rt)
                 # 2. kick off the cycle on a worker thread
                 maybe_cycle()
                 # 3. keep answering during the cycle window
-                offset = _listen_reply(cfg, store, tg, offset, split)
+                offset = _listen_reply(cfg, store, tg, offset, split, rt=rt)
                 # 4. finish the interval, then apply any /setkey edits
                 time.sleep(max(0.5, poll_s - 2 * split))
                 cfg.reload_if_changed()
@@ -426,9 +426,9 @@ def store_day_closed(store: "Store", day: "date") -> bool:
     return True
 
 
-def _listen_reply(cfg, store, tg, offset, wait_s) -> int:
+def _listen_reply(cfg, store, tg, offset, wait_s, rt=None) -> int:
     """Drain queued Telegram commands (short poll) and reply. Returns new offset."""
-    ctx = {"store": store, "cfg": cfg}
+    ctx = {"store": store, "cfg": cfg, "runtime": rt}
     if cfg.raw("TELEGRAM_TOKEN") and not isinstance(tg, FakeTelegram):
         updates = tg.get_updates(offset=offset, timeout=wait_s)
     else:

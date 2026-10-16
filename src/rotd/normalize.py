@@ -110,6 +110,7 @@ class Canonical:
     shares_float: Optional[float] = None
     float_reason: str = R_MISSING
     short_float: Optional[float] = None
+    market_cap: Optional[float] = None
     sector: str = ""
     industry: str = ""
     company: str = ""
@@ -257,7 +258,7 @@ def reconcile_symbol(symbol: str, points: Iterable[PricePoint], cfg: Config,
 
     if meta:
         for key in ("sector", "industry", "company", "short_float", "avg_volume",
-                    "open", "after_close", "day_high", "day_low"):
+                    "open", "after_close", "day_high", "day_low", "market_cap"):
             if meta.get(key) is not None and getattr(rec, key, None) in (None, ""):
                 setattr(rec, key, meta[key])
 
@@ -393,6 +394,7 @@ def snapshot_from_finviz_rows(rows: list[dict[str, Any]], cfg: Config, mode: str
                                    "after_close": row.get("after_close"),
                                    "day_high": row.get("high"),
                                    "day_low": row.get("low"),
+                                   "market_cap": row.get("market_cap"),
                                })
         out.append(rec)
     return build_snapshot(out, trading_day, mode, cycle_ts=now, source_health=source_health)

@@ -224,6 +224,7 @@ COMMANDS = (
     ("/start", "wake the bot and show the command menu"),
     ("/help", "list every command"),
     ("/setkey KEY VALUE", "set an API key after install (secrets saved, not echoed)"),
+    ("/setbudget N", "set the daily IGNITION alert budget (1..10, applied immediately)"),
     ("/keys", "show which API keys are set and which are missing"),
     ("/status", "now, session mode, shadow clock and alert budget used"),
     ("/board", "the latest ranked board (top candidates)"),
@@ -331,6 +332,28 @@ def handle_command(self, text: str, sender_chat: str, cfg: "Config",
         except Exception as exc:  # noqa: BLE001
             return f"error saving {key}: {scrub(str(exc), self._secrets)}"
         return f"ok: {key} updated (applied on next cycle)"
+
+    if name == "setbudget":
+        if len(parts) < 2:
+            return f"usage: /setbudget N  — daily IGNITION budget {cfg.int('ALERT_BUDGET_MIN', 1)}..{cfg.int('ALERT_BUDGET_MAX', 10)}"
+        try:
+            n = int(parts[1])
+        except ValueError:
+            return f"invalid budget: {parts[1]!r}"
+        lo = cfg.int("ALERT_BUDGET_MIN", 1)
+        hi = cfg.int("ALERT_BUDGET_MAX", 10)
+        if not (lo <= n <= hi):
+            return f"budget must be {lo}..{hi}"
+        try:
+            cfg.append_to_file("ALERT_BUDGET_PER_DAY", str(n))
+        except Exception as exc:  # noqa: BLE001
+            return f"error saving budget: {scrub(str(exc), self._secrets)}"
+        # Apply to the live per-day budget immediately (no restart). The next
+        # day's StateMachine picks the persisted value up from config anyway.
+        rt = (ctx or {}).get("runtime")
+        if rt is not None and getattr(rt, "sm", None) is not None:
+            rt.sm.budget.limit = n
+        return f"ok: daily alert budget set to {n} (applied immediately)"
 
     if name == "keys":
         lines = ["ROTD API keys:"]

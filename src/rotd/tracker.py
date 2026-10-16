@@ -130,7 +130,11 @@ def build_runner_list(records: list[Canonical], cfg: Config,
     for rec in records:
         if rec.price is None or not rec.prev_close or rec.prev_close <= 0:
             continue
-        if rec.price > cfg.float("MAX_PRICE", 10.0):
+        max_mcap = cfg.float("MAX_MARKET_CAP", 0.0)
+        if max_mcap > 0:
+            if rec.market_cap is None or rec.market_cap > max_mcap:
+                continue
+        elif rec.price > cfg.float("MAX_PRICE", 10.0):
             continue
         high = max(rec.day_high or rec.price, rec.after_close or rec.price, rec.price)
         gain = safe_div(high - rec.prev_close, rec.prev_close) * 100.0

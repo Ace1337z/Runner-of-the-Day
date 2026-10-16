@@ -29,6 +29,7 @@ log = logging.getLogger(__name__)
 FINVIZ_LINKS: dict[str, str] = {
     "screener": "/export/screener",
     "stock": "/export/stock",
+    "quote": "/quote.ashx",
     "groups": "/export/groups",
     "latest-filings": "/export/latest-filings",
     "news": "/export/news",
@@ -115,6 +116,47 @@ def merge_columns(columns: str) -> str:
 
 def _http_status_ok(status: int) -> bool:
     return 200 <= status < 300
+
+
+def _parse_quote_news(html: str) -> list[dict[str, str]]:
+    """Parse the news table from a finviz quote page into ROTD news rows.
+
+    The quote page (quote.ashx?t=TICKER) lists per-ticker news with finviz-hosted
+    article links (e.g. /news/368464/house-of-doge-...). Each row has a date,
+    a title+href, and a source. Returns rows shaped like the /export/news CSV
+    (Title/Source/Date/Url/Category) so callers need no change.
+    """
+    import re as _re
+
+    out: list[dict[str, str]] = []
+    # Work row-by-row so a date never drifts onto a neighbouring article. Each
+    # news row is a <tr> containing a width="130" date cell and a tab-link-news
+    # anchor. Split on the row start, then extract fields within the slice.
+    date_re = _re.compile(r'<td[^>]*width="130"[^>]*>\s*([^<]+?)\s*</td>')
+    link_re = _re.compile(
+        r'<a class="tab-link-news" href="([^"]*)"[^>]*>\s*([^<]+?)\s*</a>')
+    src_re = _re.compile(r'<span>\(([^)]+)\)</span>')
+    for chunk in _re.split(r'(?=<tr[^>]*\bcursor-pointer\b)', html):
+        link = link_re.search(chunk)
+        if not link:
+            continue
+        href, title = link.group(1).strip(), _re.sub(r"\s+", " ", link.group(2)).strip()
+        if not title:
+            continue
+        date_m = date_re.search(chunk)
+        src_m = src_re.search(chunk)
+        if href.startswith("/news/"):
+            url = f"https://elite.finviz.com{href}"
+        else:
+            url = href
+        out.append({
+            "Title": title,
+            "Source": src_m.group(1).strip() if src_m else "",
+            "Date": date_m.group(1).strip() if date_m else "",
+            "Url": url,
+            "Category": "",
+        })
+    return out
 
 
 class FinvizClient(BaseClient):
@@ -204,8 +246,27 @@ class FinvizClient(BaseClient):
     def stock(self, ticker: str) -> list[dict[str, str]]:
         return parse_csv(self._export("stock", t=ticker.upper()))
 
+    def _html(self, link: str, **params: Any) -> str:
+        """Fetch an HTML page (quote page, news article, etc.)."""
+        url = self._url(link, **params)
+        resp = self._request("GET", url)
+        if resp.status_code in (401, 403):
+            raise FinvizTokenRejected(f"finviz: token rejected (HTTP {resp.status_code})")
+        if not _http_status_ok(resp.status_code):
+            raise SourceError(f"finviz: HTTP {resp.status_code} for {link}")
+        return resp.content.decode("utf-8", errors="replace")
+
     def news(self, ticker: str = "") -> list[dict[str, str]]:
-        return parse_csv(self._export("news", t=ticker.upper()))
+        """Per-ticker news from the quote page (finviz article URLs, /news/ID/slug).
+
+        The /export/news endpoint ignores the ticker filter and returns market-wide
+        news; the per-ticker feed lives on the quote page (quote.ashx?t=TICKER),
+        which lists the finviz-hosted article links (e.g. /news/368464/...).
+        """
+        if not ticker:
+            return []
+        html = self._html("quote", t=ticker.upper())
+        return _parse_quote_news(html)
 
     def latest_filings(self, ticker: str) -> list[dict[str, str]]:
         """Filings for one ticker. Bare calls 400 ('Unable to get CIK'); pass a ticker."""

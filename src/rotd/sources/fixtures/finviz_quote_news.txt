@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head><title>House of Doge (HODO) Quote</title></head>
+<body class="m-0 is-quote">
+  <table>
+    <tr class="cursor-pointer has-label" onclick="trackAndOpenNews(event, 'GlobeNewswire', '/news/368464/house-of-doge-announces-board-of-directors-following-nasdaq-public-listing');">
+        <td width="130" align="right">
+            Jul-15-26 08:30AM
+        </td>
+        <td align="left">
+            <div class="news-link-container">
+                <div class="news-link-left">
+                    <a class="tab-link-news" href="/news/368464/house-of-doge-announces-board-of-directors-following-nasdaq-public-listing" target="_blank" >
+                        House of Doge Announces Board of Directors Following Nasdaq Public Listing
+                    </a>
+                </div>
+                <div class="news-link-right">
+                    <span>(GlobeNewswire)</span>
+                </div>
+            </div>
+        </td>
+    </tr>
+    <tr class="cursor-pointer has-label" onclick="trackAndOpenNews(event, 'Stocktwits', 'https://finance.yahoo.com/m/abc/why-these.html');">
+        <td width="130" align="right">
+            Jun-30-26 09:16PM
+        </td>
+        <td align="left">
+            <div class="news-link-container">
+                <div class="news-link-left">
+                    <a class="tab-link-news" href="https://finance.yahoo.com/m/abc/why-these.html" target="_blank" rel="nofollow">
+                        Why These Stocks Plunged In After-Hours Trading Today
+                    </a>
+                </div>
+                <div class="news-link-right">
+                    <span>(Stocktwits)</span>
+                </div>
+            </div>
+        </td>
+    </tr>
+  </table>
+</body>
+</html>

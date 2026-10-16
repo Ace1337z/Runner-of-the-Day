@@ -1,8 +1,9 @@
 # ROTD — Runner of the Day
 
-**A separate, stricter system that surfaces the few sub-$10 US stocks most likely
-to be that day's explosive runner (+100% or more), as early as the evidence
-allows — and stays silent the rest of the time.**
+**A separate, stricter system that surfaces the few US micro-caps (market cap
+≤ `MAX_MARKET_CAP`, default $100M — any share price) most likely to be that
+day's explosive runner (+100% or more), as early as the evidence allows — and
+stays silent the rest of the time.**
 
 ROTD is decision support only. It places no orders, never shorts, and never
 promises a move. It exists because the earlier penny early-warning system
@@ -57,7 +58,8 @@ Telegram itself** — from your configured chat, send:
 ```
 
 > **⚠️ Set `FINVIZ_TOKEN` immediately after install.** It is the primary feed and
-> the **only** source of the sub-$10 universe. Until it is set, ROTD pulls nothing,
+> the **only** source of the micro-cap universe (market cap ≤ `MAX_MARKET_CAP`).
+> Until it is set, ROTD pulls nothing,
 > scans return **zero candidates**, and the data grade is **F** — that is expected,
 > not a bug. (`/keys` shows what is set; the `doctor` check flags
 > `source:finviz: FINVIZ_TOKEN is not set`.) Every other key is optional.
@@ -80,7 +82,7 @@ Secrets are never read from the command line and are redacted from logs.
 
 ## Status
 
-Built and running in shadow. At most `ALERT_BUDGET_PER_DAY` (3, +1 reserve)
+Built and running in shadow. At most `ALERT_BUDGET_PER_DAY` (5, +1 reserve)
 ignition alerts per trading day; zero alerts on a quiet day is a correct outcome.
 
 **Shadow mode is the default gate.** ROTD must run for a full **10-trading-day
@@ -115,7 +117,7 @@ is what makes "as early as the evidence allows" precise rather than a guess.
 
 A cycle:
 
-1. **Universe** — `sources/finviz.py` pulls the whole sub-$10 US universe
+1. **Universe** — `sources/finviz.py` pulls the whole micro-cap US universe
    (Elite screener, full column set — the column-id mapping is verified in
    `docs/VERIFIED.md` G-17). Finviz is also the only extended-hours price source
    on this deployment.
@@ -347,7 +349,8 @@ purpose. Secrets (`secret=True`) are never displayed or logged.
 ### Universe & scope
 | Setting | Default | Unit | Meaning |
 |---|---|---|---|
-| `MAX_PRICE` | `10.00` | USD | Universe ceiling (sub-$10). **No price floor.** |
+| `MAX_PRICE` | `10.00` | USD | Legacy price ceiling, used only when `MAX_MARKET_CAP=0`. **No price floor.** |
+| `MAX_MARKET_CAP` | `100000000` | USD | Universe ceiling: market cap ≤ this, any share price (high-priced micro-caps qualify). `0` = disabled. |
 | `INCLUDE_OTC` | `0` | bool | OTC off — poorer data, different rules. |
 | `INCLUDE_DERIVATIVES` | `0` | bool | Warrants/rights/units excluded. |
 | `PRICE_BANDS` | `0.20,0.50,1,5,10` | USD bounds | Tier boundaries for metric / MISS breakdowns. |
@@ -357,8 +360,8 @@ purpose. Secrets (`secret=True`) are never displayed or logged.
 ### Data reconciliation (`DATA-01..12`)
 | Setting | Default | Unit | Meaning |
 |---|---|---|---|
-| `PRICE_CONFLICT_PCT_REG` | `1.0` | % | Two sources >1% apart in regular hours ⇒ CONFLICT. |
-| `PRICE_CONFLICT_PCT_EXT` | `2.0` | % | Same in extended hours. |
+| `PRICE_CONFLICT_PCT_REG` | `50.0` | % | Two sources >50% apart in regular hours ⇒ CONFLICT. Wide on purpose: micro-caps jump +20-30% in seconds and helper feeds lag. |
+| `PRICE_CONFLICT_PCT_EXT` | `50.0` | % | Same in extended hours. |
 | `QUOTE_MAX_AGE_S_REG` | `20` | s | A regular-hours quote older than this is STALE. |
 | `QUOTE_MAX_AGE_S_EXT` | `60` | s | An extended-hours quote older than this is STALE. |
 | `BAR_MAX_AGE_S` | `90` | s | A bar series whose last bar is older than this is STALE. |
@@ -431,7 +434,7 @@ cannot ignite on stale strength. Re-arming starts the confirmation window over.
 ### Alert budget (scarcity)
 | Setting | Default | Unit | Meaning |
 |---|---|---|---|
-| `ALERT_BUDGET_PER_DAY` | `3` | pushes | Max IGNITION pushes per trading day. |
+| `ALERT_BUDGET_PER_DAY` | `5` | pushes | Max IGNITION pushes per trading day. Change live via `/setbudget N`. |
 | `RESERVE_SLOTS` | `1` | pushes | Reserve pushes beyond budget for exceptional names. |
 | `EXCEPTIONAL_SCORE` | `90` | points | A reserve candidate must score at least this. |
 | `ALERT_MIN_GAP_MIN` | `15` | minutes | Minimum spacing between pushes. |

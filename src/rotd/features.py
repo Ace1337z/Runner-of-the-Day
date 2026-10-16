@@ -123,7 +123,8 @@ def compute_features(rec: Canonical, cfg: Config, snap: Snapshot,
     # --- tape / ignition ---
     if rec.price is None:
         for n in ("gain_from_open", "gain_from_prev_close", "rvol", "range_expansion",
-                  "accel_5m", "vwap_dist", "dollar_volume_15m", "spread_pct"):
+                  "accel_5m", "vwap_dist", "dollar_volume_15m", "spread_pct",
+                  "vol_3m", "dollar_volume_10m"):
             fs.add(Feature(n, None, missing_reason=M_NO_PRICE, basis=basis))
     else:
         go = safe_div(rec.price - rec.open, rec.open) * 100.0 if rec.open else None
@@ -166,6 +167,18 @@ def compute_features(rec: Canonical, cfg: Config, snap: Snapshot,
                        scope=rec.volume_basis, window="15m"))
         fs.add(Feature("spread_pct", rec.spread_pct, "%",
                        "" if rec.spread_pct is not None else M_NO_HISTORY, basis=basis))
+
+        # Short-term volume velocity (Upgrade 1): deltas from the in-memory rolling
+        # cumulative-volume deque, so the scorer can reward a stock trading RIGHT
+        # NOW without an external 15-min bar feed. MISSING until enough history.
+        vol3 = history.get("vol_3m")
+        fs.add(Feature("vol_3m", vol3, "shares",
+                       "" if vol3 is not None else M_NO_HISTORY, basis=basis,
+                       scope=rec.volume_basis, window="3m"))
+        dvol10 = history.get("dollar_volume_10m")
+        fs.add(Feature("dollar_volume_10m", dvol10, "USD",
+                       "" if dvol10 is not None else M_NO_HISTORY, basis=basis,
+                       scope=rec.volume_basis, window="10m"))
 
     # new-high flag: price at/near the day high (a fresh 15m high is a breakout).
     if rec.price and rec.day_high:

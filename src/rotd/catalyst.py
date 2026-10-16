@@ -145,6 +145,11 @@ class CatalystService:
         res = self._reports.get(symbol.upper())
         if not res:
             return None
+        # A rules-only fallback (no model, timeout, failed validation) is not a
+        # catalyst verdict: it must not award a numeric score that would stop
+        # scoring.py's active-weight normalization (Bug Fix 2).
+        if res.report.source == "rules":
+            return None
         base = self._QUALITY_SCORE.get(res.report.catalyst_quality)
         if base is None:
             return None

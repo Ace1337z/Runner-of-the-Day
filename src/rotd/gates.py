@@ -130,6 +130,18 @@ def _spread_limit(price: float, cfg: Config, mode: str) -> Optional[float]:
 def gate_price(rec: Canonical, cfg: Config) -> GateResult:
     if rec.price is None:
         return GateResult("G-PRICE", False, F_PRICE_UNKNOWN)
+    max_mcap = cfg.float("MAX_MARKET_CAP", 0.0)
+    if max_mcap > 0:
+        # Market-cap scope (Upgrade 6): a $100M cap is the universe ceiling and
+        # share price no longer restricts (high-priced micro-caps qualify). Fail
+        # closed: an unknown market cap cannot pass G-PRICE.
+        if rec.market_cap is None:
+            return GateResult("G-PRICE", False, F_PRICE_UNKNOWN,
+                              "no market cap; cannot confirm scope")
+        if rec.market_cap > max_mcap:
+            return GateResult("G-PRICE", False, F_PRICE_TOO_HIGH,
+                              f"mcap {rec.market_cap:,.0f} > {max_mcap:,.0f}")
+        return GateResult("G-PRICE", True, P_OK, f"mcap {rec.market_cap:,.0f} <= {max_mcap:,.0f}")
     if rec.price > cfg.float("MAX_PRICE", 10.0):
         return GateResult("G-PRICE", False, F_PRICE_TOO_HIGH,
                           f"{rec.price:.4f} > {cfg.float('MAX_PRICE', 10.0):.2f}")

@@ -18,8 +18,10 @@ inputs (AC1/S5), so ``rotd replay`` can re-run it byte-for-byte.
 from __future__ import annotations
 
 import logging
+import re
+from collections import deque
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
 from .auditor import BundleInputs
@@ -35,7 +37,7 @@ from .state_machine import StateMachine, State, Transition
 from .store import Store
 from .sources.base import SourceError
 from .tracker import PathTracker, Runner, build_runner_list
-from .util import as_utc, fmt_ts, now_utc
+from .util import as_utc, fmt_ts, now_utc, sha256_hex
 
 log = logging.getLogger(__name__)
 
@@ -71,6 +73,8 @@ class Runtime:
         self.trackers: dict[int, PathTracker] = {}
         self._day: Optional[date] = None
         self._history: dict[str, dict[str, Any]] = {}
+        self._vol_history: dict[str, deque] = {}   # (now, cumulative volume) per symbol
+        self._catalyst_items: dict[str, list[dict[str, Any]]] = {}
         self._first_seen: dict[str, datetime] = {}
         self._universe: set[str] = set()
         self._data_grades: list[str] = []
@@ -81,6 +85,8 @@ class Runtime:
             self._day = day
             self.sm = StateMachine(self.cfg, day)
             self._history.clear()
+            self._vol_history.clear()
+            self._catalyst_items.clear()
             self._first_seen.clear()
             self._data_grades = []
 
@@ -92,9 +98,16 @@ class Runtime:
         try:
             raw = fv.universe()
             rows = [fv.parse_row(r) for r in raw]
-            # Keep only sub-$10 names (G-PRICE ceiling) with a price.
-            cap = self.cfg.float("MAX_PRICE", 10.0)
-            rows = [r for r in rows if r.get("price") is not None and r["price"] <= cap]
+            # Scope: market-cap ceiling (MAX_MARKET_CAP) when set, else the legacy
+            # price ceiling (MAX_PRICE). A name without a price is never usable.
+            rows = [r for r in rows if r.get("price") is not None]
+            max_mcap = self.cfg.float("MAX_MARKET_CAP", 0.0)
+            if max_mcap > 0:
+                rows = [r for r in rows if r.get("market_cap") is not None
+                        and r["market_cap"] <= max_mcap]
+            else:
+                cap = self.cfg.float("MAX_PRICE", 10.0)
+                rows = [r for r in rows if r["price"] <= cap]
             return rows, {"finviz": {"ok": True, "n": len(rows)}}
         except Exception as exc:  # noqa: BLE001
             log.warning("universe fetch failed: %s", exc)
@@ -171,6 +184,40 @@ class Runtime:
         return out
 
 
+    # -- short-term volume velocity (Upgrade 1) --------------------------------
+    @staticmethod
+    def _delta_volume(dq: deque, now: datetime, seconds: float) -> Optional[float]:
+        """Cumulative volume now minus the sample ~``seconds`` ago (None if too young)."""
+        if not dq:
+            return None
+        cutoff = now - timedelta(seconds=seconds)
+        base: Optional[tuple[datetime, float]] = None
+        for ts, vol in dq:  # deque is ordered oldest->newest
+            if ts <= cutoff:
+                base = (ts, vol)
+            else:
+                break
+        if base is None:
+            return None  # no sample old enough yet
+        cur = dq[-1][1]
+        return max(0.0, cur - base[1])
+
+    def _update_vol_history(self, snap: Snapshot, now: datetime) -> None:
+        """Roll per-symbol cumulative volume and derive 3m/10m deltas into history."""
+        for sym, rec in snap.records.items():
+            if rec.volume is None:
+                continue
+            dq = self._vol_history.setdefault(sym, deque(maxlen=60))
+            dq.append((now, rec.volume))
+            hist = self._history.setdefault(sym, {})
+            vol_3m = self._delta_volume(dq, now, 180.0)
+            vol_10m = self._delta_volume(dq, now, 600.0)
+            if vol_3m is not None:
+                hist["vol_3m"] = vol_3m
+            if vol_10m is not None and rec.price:
+                hist["dollar_volume_10m"] = vol_10m * rec.price
+
+
     # -- the cycle ----------------------------------------------------------
     def cycle(self, mode: str, day: date, now: Optional[datetime] = None,
               async_mode: bool = True) -> CycleResult:
@@ -191,6 +238,11 @@ class Runtime:
         snap.quality["half_day"] = _is_half(mode, day)
         self._universe = set(snap.records)
         self._data_grades.append(snap.data_grade)
+
+        # Short-term volume velocity (Upgrade 1): roll the cumulative volume per
+        # symbol and derive 3m/10m deltas so the scorer can reward a stock that is
+        # trading RIGHT NOW, not one that spiked at the open and went dead.
+        self._update_vol_history(snap, now)
 
         # features -> gates -> score -> rank
         scored: list[Scored] = []
@@ -270,8 +322,81 @@ class Runtime:
     def _catalyst_score(self, symbol: str) -> Optional[float]:
         if not self.catalyst:
             return None
+        # No model configured (or rules-only fallback): there is no catalyst
+        # verdict, so the score must be MISSING (None), never a dummy number.
+        # A present dummy would stop scoring.py's active-weight normalization and
+        # silently cap every otherwise-complete score (Bug Fix 2).
+        if not self.catalyst.configured():
+            return None
         items = getattr(self, "_catalyst_items", {}).get(symbol, [])
         return self.catalyst.best_score(symbol, items)
+
+    def _fetch_catalyst_items(self, symbols: list[str], now: datetime) -> None:
+        """Fetch fresh news/headlines + SEC filings for the audit candidates.
+
+        Populates ``self._catalyst_items[symbol]`` with items inside
+        ``AI_CAUSE_WINDOW_H`` (Feature Wiring 4). Runs once per day per symbol
+        (the per-day cache is cleared by ``_ensure_day``) so the Finviz rate
+        budget is respected. Fail soft: any source error leaves the symbol with
+        no items — the auditor sees an empty bundle, never a crash.
+        """
+        fv = self.clients.get("finviz")
+        if fv is None:
+            return
+        window_h = self.cfg.float("AI_CAUSE_WINDOW_H", 4)
+        for sym in symbols:
+            if sym in self._catalyst_items:
+                continue  # already fetched this trading day
+            items: list[dict[str, Any]] = []
+            try:
+                for row in fv.news(sym):
+                    item = self._news_item(row, now, window_h)
+                    if item:
+                        items.append(item)
+            except Exception as exc:  # noqa: BLE001 - a feed miss is not a crash
+                log.debug("catalyst news fetch failed for %s: %s", sym, exc)
+            try:
+                for row in fv.latest_filings(sym):
+                    item = self._filing_item(row, now, window_h)
+                    if item:
+                        items.append(item)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("catalyst filings fetch failed for %s: %s", sym, exc)
+            self._catalyst_items[sym] = items
+
+    @staticmethod
+    def _news_item(row: dict[str, Any], now: datetime, window_h: float) -> Optional[dict[str, Any]]:
+        """One Finviz news row -> a BundleInputs news item (fresh only)."""
+        title = (row.get("Title") or "").strip()
+        if not title:
+            return None
+        age_min = _row_age_min(row.get("Date"), now)
+        if age_min is not None and age_min > window_h * 60.0:
+            return None  # outside the cause window: not a fresh catalyst
+        item_id = (row.get("Url") or "").strip() or sha256_hex(title.encode("utf-8"))[:16]
+        return {"kind": "news", "id": item_id, "outlet": (row.get("Source") or "").strip(),
+                "age_text": _age_text(age_min), "age_class": "FRESH" if age_min is not None else "OLD",
+                "headline": title, "text": title}
+
+    @staticmethod
+    def _filing_item(row: dict[str, Any], now: datetime, window_h: float) -> Optional[dict[str, Any]]:
+        """One Finviz latest-filings row -> a BundleInputs filings item (fresh only).
+
+        The latest-filings export columns are: Filing Date, Report Date, Form,
+        Description, Filing (SEC index URL), Document.
+        """
+        form = (row.get("Form") or row.get("Form Type") or "").strip()
+        title = (row.get("Description") or row.get("Title") or "").strip()
+        if not form and not title:
+            return None
+        age_min = _row_age_min(row.get("Filing Date") or row.get("Date"), now)
+        if age_min is not None and age_min > window_h * 60.0:
+            return None
+        item_id = (row.get("Filing") or row.get("URL") or "").strip() \
+            or sha256_hex(f"{form}:{title}".encode("utf-8"))[:16]
+        return {"kind": "filing", "id": item_id, "form": form,
+                "date": (row.get("Filing Date") or row.get("Date") or "").strip(),
+                "items": None, "summary": title}
 
     # -- tracking / grading (§12) -------------------------------------------
     def _observe_trackers(self, snap: Snapshot, now: datetime) -> None:
@@ -307,6 +432,11 @@ class Runtime:
         vwap_state = None
         if vwap is not None:
             vwap_state = "ABOVE" if vwap > 0.5 else ("BELOW" if vwap < -0.5 else "AT")
+        # Wire the fetched news/filings (Feature Wiring 4) into the fact bundle so
+        # the methodology_v3 auditor receives real text when a model is configured.
+        items = getattr(self, "_catalyst_items", {}).get(rec.symbol, [])
+        news_items = [i for i in items if i.get("kind") == "news"]
+        filing_items = [i for i in items if i.get("kind") == "filing"]
         return BundleInputs(
             symbol=rec.symbol, company=rec.company, exchange="",
             session=mode, time_et=fmt_ts(now),
@@ -320,8 +450,9 @@ class Runtime:
             phase=phase, gate_passed=gate_passed,
             gate_blockers=[r.gate for r in rep.results if not r.passed],
             rules_verdict="ARMED" if gate_passed else "REJECT",
-            levels=[], news={"status": "OK", "items": []},
-            filings={"status": "OK", "items": []},
+            levels=[],
+            news={"status": "OK", "items": news_items},
+            filings={"status": "OK", "items": filing_items},
             context={"market": None, "sector_hot": None, "analogs": None,
                      "multi_timeframe": None, "rank": rank_no},
         )
@@ -340,6 +471,11 @@ class Runtime:
         top_n = self.cfg.int("CATALYST_TOP_N_EARLY", 10)
         audit_syms = [s.symbol for s in rk.day_ranked[:top_n]]
         out: dict[str, Any] = {"audited": [], "verdicts": {}}
+        # Fetch fresh news + filings for the audit candidates (once per day per
+        # symbol; the per-day cache is cleared by _ensure_day). Only when a model
+        # is configured — without one the auditor is rules-only and needs no text.
+        if self.catalyst.configured():
+            self._fetch_catalyst_items(audit_syms, now)
         for sym in audit_syms:
             rec = snap.records.get(sym)
             sc = scored_by.get(sym)
@@ -393,8 +529,14 @@ class Runtime:
         if fv is not None:
             try:
                 rows = [fv.parse_row(r) for r in fv.universe()]
-                cap = self.cfg.float("MAX_PRICE", 10.0)
-                rows = [r for r in rows if r.get("price") is not None and r["price"] <= cap]
+                rows = [r for r in rows if r.get("price") is not None]
+                max_mcap = self.cfg.float("MAX_MARKET_CAP", 0.0)
+                if max_mcap > 0:
+                    rows = [r for r in rows if r.get("market_cap") is not None
+                            and r["market_cap"] <= max_mcap]
+                else:
+                    cap = self.cfg.float("MAX_PRICE", 10.0)
+                    rows = [r for r in rows if r["price"] <= cap]
                 snap = snapshot_from_finviz_rows(rows, self.cfg, "POST", day)
                 records = list(snap.records.values())
             except Exception as exc:  # noqa: BLE001
@@ -419,6 +561,58 @@ def _is_half(mode: str, day: date) -> bool:
         return is_half_day(day)
     except Exception:  # noqa: BLE001
         return False
+
+
+def _row_age_min(date_str: Optional[str], now: datetime) -> Optional[float]:
+    """Minutes since a news/filing row's date string (None when unparseable).
+
+    Handles ISO-8601 (SEC/Finviz export) and the quote-page format
+    ``Jul-15-26 08:30AM`` (ET, 2-digit year) the per-ticker news feed uses.
+    """
+    if not date_str:
+        return None
+    s = str(date_str).strip()
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return max(0.0, (now - as_utc(dt)).total_seconds() / 60.0)
+    except ValueError:
+        pass
+    m = re.match(
+        r"([A-Za-z]{3})-(\d{1,2})-(\d{2})\s+(\d{1,2}):(\d{2})\s*([AaPp][Mm])", s)
+    if not m:
+        # Finviz latest-filings date: M/D/YYYY (no time).
+        m2 = re.match(r"(\d{1,2})/(\d{1,2})/(\d{4})$", s)
+        if m2:
+            from .util import ET
+            try:
+                mm2, dd2, yy2 = (int(x) for x in m2.groups())
+                dt2 = datetime(yy2, mm2, dd2, 0, 0, tzinfo=ET)
+            except (ValueError, TypeError):
+                return None
+            return max(0.0, (now - dt2).total_seconds() / 60.0)
+        return None
+    months = {name: i + 1 for i, name in enumerate(
+        ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))}
+    mon, day, yr, hh, mm, ampm = m.groups()
+    month = months.get(mon.title())
+    if month is None:
+        return None
+    try:
+        hour = int(hh) % 12 + (12 if ampm.lower() == "pm" else 0)
+        from .util import ET
+        dt = datetime(2000 + int(yr), month, int(day), hour, int(mm), tzinfo=ET)
+    except (ValueError, TypeError):
+        return None
+    return max(0.0, (now - dt).total_seconds() / 60.0)
+
+
+def _age_text(age_min: Optional[float]) -> str:
+    if age_min is None:
+        return "unknown age"
+    if age_min < 60:
+        return f"{int(age_min)}m ago"
+    return f"{age_min / 60.0:.1f}h ago"
 
 
 def _phase_from_mode(mode: str) -> str:

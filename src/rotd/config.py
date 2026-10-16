@@ -50,17 +50,24 @@ _GLOBAL: list[Setting] = [
     Setting("ROTD_HOME", "", "path", "Install home; anchors the DB, config and logs."),
 
     # --- universe & scope (section 18.1/18.2) ---
-    Setting("MAX_PRICE", "10.00", "USD", "Universe ceiling: only sub-$10 names. There is NO price floor.", ),
+    Setting("MAX_PRICE", "10.00", "USD",
+            "Price ceiling used ONLY when MAX_MARKET_CAP=0 (legacy sub-$10 mode). There is NO price floor."),
+    Setting("MAX_MARKET_CAP", "100000000", "USD",
+            "Universe ceiling: only names with market cap <= this. 0 = disabled (falls back to MAX_PRICE). "
+            "Allows high-priced micro-caps ($15-$40 shares) with tiny floats into the pool."),
     Setting("INCLUDE_OTC", "0", "bool", "OTC off by default: the data is poorer and rules differ."),
     Setting("INCLUDE_DERIVATIVES", "0", "bool", "Warrants/rights/units excluded by default."),
     Setting("PRICE_BANDS", "0.20,0.50,1,5,10", "USD bounds",
             "Price-band boundaries for metric/MISS breakdowns (§18.1)."),
 
     # --- data reconciliation (DATA-01..12) ---
-    Setting("PRICE_CONFLICT_PCT_REG", "1.0", "%",
-            "Two sources >1% apart in regular hours => CONFLICT (DATA-02)."),
-    Setting("PRICE_CONFLICT_PCT_EXT", "2.0", "%",
-            "Two sources >2% apart in extended hours => CONFLICT (DATA-02)."),
+    Setting("PRICE_CONFLICT_PCT_REG", "50.0", "%",
+            "Two sources >50% apart in regular hours => CONFLICT (DATA-02). Wide on purpose: "
+            "micro-caps jump +20-30% in seconds and unverified helper feeds lag; a wide "
+            "tolerance keeps vertical moves / feed lag from falsely flagging CONFLICT."),
+    Setting("PRICE_CONFLICT_PCT_EXT", "50.0", "%",
+            "Two sources >50% apart in extended hours => CONFLICT (DATA-02). Wide for the same "
+            "vertical-move / lag reasons as the regular-hours tolerance."),
     Setting("QUOTE_MAX_AGE_S_REG", "20", "s", "A regular-hours quote older than this is STALE (DATA-03)."),
     Setting("QUOTE_MAX_AGE_S_EXT", "60", "s", "An extended-hours quote older than this is STALE (DATA-03)."),
     Setting("BAR_MAX_AGE_S", "90", "s", "A bar series whose last bar is older than this is STALE (DATA-03)."),
@@ -122,7 +129,9 @@ _GLOBAL: list[Setting] = [
     Setting("HALT_RESUME_EVAL_MIN", "2", "minutes", "Evaluate a resumption for this long after a halt."),
 
     # --- alert budget (section 11.2) ---
-    Setting("ALERT_BUDGET_PER_DAY", "3", "pushes", "At most this many IGNITION pushes per trading day (A1)."),
+    Setting("ALERT_BUDGET_PER_DAY", "5", "pushes", "At most this many IGNITION pushes per trading day (A1)."),
+    Setting("ALERT_BUDGET_MIN", "1", "pushes", "Floor for /setbudget (a sane minimum; 0 would silence the day)."),
+    Setting("ALERT_BUDGET_MAX", "10", "pushes", "Ceiling for /setbudget (a sane cap so a typo cannot set an absurd budget)."),
     Setting("EXCEPTIONAL_SCORE", "90", "points", "A reserve-slot candidate must score at least this (A4)."),
     Setting("ALERT_MIN_GAP_MIN", "15", "minutes", "Minimum spacing between pushes (A3)."),
     Setting("RESERVE_SLOTS", "1", "pushes", "Reserve pushes beyond the budget for exceptional names (A4)."),

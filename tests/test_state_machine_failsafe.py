@@ -28,7 +28,8 @@ def _rec(symbol="EXMP", price=2.31) -> Canonical:
                      volume=3_000_000, volume_basis="SINGLE_VENUE",
                      bid=price - 0.01, ask=price + 0.01, spread_pct=0.9,
                      day_high=price * 1.04, day_low=1.98, shares_float=4_000_000,
-                     short_float=22.0, company="Exemplar Inc", data_grade="A",
+                     short_float=22.0, market_cap=9_240_000,
+                     company="Exemplar Inc", data_grade="A",
                      fetched_at=T0)
 
 

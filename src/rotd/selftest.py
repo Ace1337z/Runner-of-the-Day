@@ -152,7 +152,7 @@ def _reconcile_checks(cfg: Config, now, results, step) -> None:
     _check(ok.price_reason == N.R_OK, "agreeing sources flagged", results,
            "DATA-02 agreement is OK")
     confl = reconcile_symbol("T", [PricePoint("finviz", 2.00, now, scope="SINGLE_VENUE"),
-                                   PricePoint("twelvedata", 2.50, now)], cfg, "PRE", now=now)
+                                   PricePoint("twelvedata", 4.20, now)], cfg, "PRE", now=now)
     _check(R_CONFLICT in confl.reasons, "far-apart sources not flagged", results,
            "DATA-02 conflict detected")
 
@@ -219,7 +219,8 @@ def _score_checks(cfg: Config, results, step) -> None:
                     price_scope="SINGLE_VENUE", prev_close=1.20, change_pct=108.0,
                     volume=8e6, volume_basis="SINGLE_VENUE", dollar_volume=2e7,
                     bid=2.49, ask=2.52, spread_pct=1.2, day_high=2.60, day_low=1.30,
-                    shares_float=3e6, float_reason="OK", short_float=22.0, data_grade="A",
+                    shares_float=3e6, float_reason="OK", short_float=22.0,
+                    market_cap=7_500_000, data_grade="A",
                     fetched_at=now)
     snap = Snapshot(trading_day=now.date(), mode="PRE", cycle_ts=now, records={"RUN": rec})
     fs = F.compute_features(rec, cfg, snap, catalyst_score=80.0,
