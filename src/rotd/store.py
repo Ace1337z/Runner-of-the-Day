@@ -203,7 +203,11 @@ class Store:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
+        # 30s busy timeout: the startup prune runs on the listen daemon while a
+        # CLI command (rotd board/status) opens the same DB. Without it the
+        # second writer fails instantly with "database is locked".
+        self._conn = sqlite3.connect(str(self.path), timeout=30.0,
+                                     check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         # WAL: the listen daemon writes on a worker thread while Telegram reads on
         # the main thread — WAL keeps readers from blocking the writer. NORMAL is

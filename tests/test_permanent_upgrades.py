@@ -605,3 +605,28 @@ def test_finalize_skips_a_day_with_no_data(tmp_path: Path, monkeypatch):
     cli_mod._finalize_if_closed(RT(), [date(2026, 10, 16)])
     assert calls == []
     store.close()
+
+
+# --- fresh-install alignment: busy timeout + gateway parser edges ----------
+
+def test_store_uses_a_busy_timeout(tmp_path: Path):
+    """Startup pruning on the daemon must not fail a concurrent CLI writer."""
+    store = Store(tmp_path / "r.db")
+    assert store._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30_000
+    store.close()
+
+
+def test_model_text_survives_free_gateway_shapes():
+    # fenced JSON with prose around it, as Token Harbor :free models emit
+    fenced = 'Here is the report:\n```json\n{"a":1}\n```\n'
+    assert model_text(fenced) == '{"a":1}'
+    # reasoning_content chunks are not the answer
+    body = ('data: {"choices":[{"delta":{"reasoning_content":"hm"}}]}\n\n'
+            'data: {"choices":[{"delta":{"content":"{\\"a\\":1}"}}]}\n\n'
+            'data: [DONE]\n')
+    assert model_text(body, "text/event-stream") == '{"a":1}'
+    # an unclosed <think> (cut stream) is dropped, not parsed as JSON
+    assert model_text("<think>still thinking") == ""
+    # content-parts shape
+    parts = '{"choices":[{"message":{"content":[{"type":"text","text":"ok"}]}}]}'
+    assert model_text(parts) == "ok"

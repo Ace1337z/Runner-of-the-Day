@@ -689,33 +689,55 @@ def _parse_json_object(text: str) -> Optional[dict[str, Any]]:
     """Strict JSON object; tolerate reasoning blocks and a fence only (H9)."""
     if not text:
         return None
-    s = strip_reasoning(text).strip()
-    if s.startswith("```"):
-        s = s.split("```", 2)[1] if s.count("```") >= 2 else s.strip("`")
-        if s.lstrip().lower().startswith("json"):
-            s = s.lstrip()[4:]
+    s = _strip_fences(strip_reasoning(text).strip())
     try:
         obj = json.loads(s)
     except ValueError:
-        # last resort: the outermost object
-        i, j = s.find("{"), s.rfind("}")
-        if i < 0 or j <= i:
+        # last resort: the first object in the text, ignoring trailing prose
+        i = s.find("{")
+        if i < 0:
             return None
         try:
-            obj = json.loads(s[i:j + 1])
+            obj, _ = json.JSONDecoder().raw_decode(s[i:])
         except ValueError:
             return None
     return obj if isinstance(obj, dict) else None
 
 
 _THINK_RE = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
+_THINK_OPEN_RE = re.compile(r"<think(?:ing)?>.*\Z", re.DOTALL | re.IGNORECASE)
+_FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)```", re.DOTALL | re.IGNORECASE)
 
 
 def strip_reasoning(text: str) -> str:
-    """Drop ``<think>...</think>`` blocks that reasoning models emit before the JSON."""
+    """Drop ``<think>...</think>`` blocks that reasoning models emit before the JSON.
+
+    An *unclosed* block (the stream was cut mid-thought) is dropped to the end:
+    keeping it would leak reasoning into the parser.
+    """
     if not text:
         return ""
-    return _THINK_RE.sub("", text).strip()
+    return _THINK_OPEN_RE.sub("", _THINK_RE.sub("", text)).strip()
+
+
+def _strip_fences(text: str) -> str:
+    """Return the inside of a ```json ... ``` block, else the text unchanged."""
+    if "```" not in text:
+        return text
+    m = _FENCE_RE.search(text)
+    if m and m.group(1).strip():
+        return m.group(1).strip()
+    return text.replace("```json", "").replace("```", "").strip()
+
+
+def _content_piece(ch: dict[str, Any]) -> str:
+    """One chunk's answer text. Reasoning fields are never the answer."""
+    piece = ((ch.get("delta") or {}).get("content")
+             or (ch.get("message") or {}).get("content")
+             or ch.get("text"))
+    if isinstance(piece, list):  # content-parts shape: [{"type":"text","text":...}]
+        return "".join(str(p.get("text") or "") for p in piece if isinstance(p, dict))
+    return str(piece) if piece else ""
 
 
 def model_text(body: str, content_type: str = "") -> str:
@@ -724,11 +746,14 @@ def model_text(body: str, content_type: str = "") -> str:
     The configured gateway streams SSE chunks even when ``"stream": false`` is
     requested, so both shapes must be handled: a JSON body
     (``choices[0].message.content``) or an SSE stream where the text is the
-    concatenation of ``choices[0].delta.content``. ``delta.reasoning`` and
-    ``reasoning_details`` are never the answer and are ignored.
+    concatenation of ``choices[0].delta.content``. ``delta.reasoning``,
+    ``delta.reasoning_content`` and ``reasoning_details`` are never the answer
+    and are ignored. Never raises: a malformed body returns ``""``.
     """
-    raw = body or ""
-    if raw.lstrip().startswith("data:") or "text/event-stream" in (content_type or ""):
+    raw = (body or "").lstrip("\ufeff")
+    is_sse = ("text/event-stream" in (content_type or "")
+              or any(line.strip().startswith("data:") for line in raw.splitlines()))
+    if is_sse:
         parts: list[str] = []
         for line in raw.splitlines():
             line = line.strip()
@@ -739,23 +764,27 @@ def model_text(body: str, content_type: str = "") -> str:
                 continue
             try:
                 obj = json.loads(payload)
-            except ValueError:
+            except ValueError:  # heartbeat / keep-alive line
+                continue
+            if not isinstance(obj, dict):
                 continue
             for ch in obj.get("choices") or []:
-                piece = ((ch.get("delta") or {}).get("content")
-                         or (ch.get("message") or {}).get("content"))
-                if piece:
-                    parts.append(piece)
-        return strip_reasoning("".join(parts))
+                if isinstance(ch, dict):
+                    parts.append(_content_piece(ch))
+        if parts:
+            return _strip_fences(strip_reasoning("".join(parts)))
+        return ""
     try:
         obj = json.loads(raw)
     except ValueError:
-        return strip_reasoning(raw)
+        return _strip_fences(strip_reasoning(raw))
     try:
         content = obj["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError):
-        return strip_reasoning(raw)
-    return strip_reasoning(content or "")
+        return _strip_fences(strip_reasoning(raw))
+    if isinstance(content, list):
+        content = _content_piece({"message": {"content": content}})
+    return _strip_fences(strip_reasoning(content or ""))
 
 
 def http_caller(cfg: Config, system: str, user: str) -> str:
