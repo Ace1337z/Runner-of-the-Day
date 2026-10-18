@@ -180,6 +180,15 @@ CREATE TABLE IF NOT EXISTS raw_payloads (
     body          TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_raw_day ON raw_payloads(trading_day);
+
+-- Read-only Telegram subscribers. The owner is TELEGRAM_CHAT_ID and is never
+-- stored here; this table only holds the time-bound guest list.
+CREATE TABLE IF NOT EXISTS subscribers (
+    chat_id       TEXT PRIMARY KEY,
+    expires_at    TEXT NOT NULL,          -- ISO date 'YYYY-MM-DD' (UTC)
+    label         TEXT DEFAULT '',
+    created_at    TEXT NOT NULL
+);
 """
 
 
@@ -412,6 +421,61 @@ class Store:
                      "VALUES (?,?,?,?,?)",
                      (trading_day.isoformat(), _iso(cycle_ts), source, kind,
                       body if isinstance(body, str) else stable_json(body)))
+
+    # -- subscribers --------------------------------------------------------
+    def add_subscriber(self, chat_id: str, days: int, label: str = "") -> date:
+        """Insert or renew a read-only subscriber. Returns the expiry date.
+
+        ``days`` counts from today (UTC), matching the ``date('now')`` comparison
+        used by :meth:`get_active_subscribers`.
+        """
+        cid = str(chat_id).strip()
+        if not cid:
+            raise ValueError("subscriber: empty chat_id")
+        days = int(days)
+        if days < 1:
+            raise ValueError("subscriber: days must be >= 1")
+        expires = now_utc().date() + timedelta(days=days)
+        self.execute(
+            """INSERT INTO subscribers(chat_id, expires_at, label, created_at)
+               VALUES (?,?,?,?)
+               ON CONFLICT(chat_id) DO UPDATE SET
+                   expires_at=excluded.expires_at,
+                   label=CASE WHEN excluded.label != '' THEN excluded.label
+                              ELSE subscribers.label END""",
+            (cid, expires.isoformat(), label.strip(), _iso(now_utc())))
+        return expires
+
+    def remove_subscriber(self, chat_id: str) -> bool:
+        cur = self.execute("DELETE FROM subscribers WHERE chat_id=?", (str(chat_id).strip(),))
+        return cur.rowcount > 0
+
+    def get_active_subscribers(self) -> list[str]:
+        """Chat ids whose subscription has not lapsed (UTC calendar date)."""
+        rows = self.query(
+            "SELECT chat_id FROM subscribers WHERE date('now') <= expires_at "
+            "ORDER BY created_at")
+        return [str(r["chat_id"]) for r in rows]
+
+    def is_active(self, chat_id: str) -> bool:
+        row = self.query_one(
+            "SELECT 1 FROM subscribers WHERE chat_id=? AND date('now') <= expires_at",
+            (str(chat_id).strip(),))
+        return row is not None
+
+    def subscriber_expiry(self, chat_id: str) -> Optional[str]:
+        """The stored expiry for a known chat (active or lapsed), else ``None``."""
+        row = self.query_one("SELECT expires_at FROM subscribers WHERE chat_id=?",
+                             (str(chat_id).strip(),))
+        return str(row["expires_at"]) if row else None
+
+    def get_subscriber(self, chat_id: str) -> Optional[sqlite3.Row]:
+        """The whole row for a known chat (active or lapsed), else ``None``."""
+        return self.query_one("SELECT * FROM subscribers WHERE chat_id=?",
+                              (str(chat_id).strip(),))
+
+    def all_subscribers(self) -> list[sqlite3.Row]:
+        return self.query("SELECT * FROM subscribers ORDER BY expires_at DESC")
 
     # -- retained maintenance ----------------------------------------------
     def prune(self, raw_retention_days: int, today: Optional[date] = None) -> dict[str, int]:

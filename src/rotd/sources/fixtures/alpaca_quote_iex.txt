@@ -1,7 +1,1 @@
-<html>
-<head><title>401 Authorization Required</title></head>
-<body>
-<center><h1>401 Authorization Required</h1></center>
-<hr><center>nginx</center>
-</body>
-</html>
+{"quote":{"ap":363.43,"as":40,"ax":"V","bp":328.76,"bs":40,"bx":"V","c":["R"],"t":"2026-10-16T20:00:00.001061859Z","z":"C"},"symbol":"AAPL"}

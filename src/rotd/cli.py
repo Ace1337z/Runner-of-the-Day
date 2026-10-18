@@ -36,7 +36,7 @@ from .runtime import Runtime
 from .sources import build_clients
 from .store import Store
 from .telegram import FakeTelegram, TelegramClient
-from .util import fmt_ts, now_utc
+from .util import fmt_ts, last_session, now_utc
 
 log = logging.getLogger(__name__)
 
@@ -318,7 +318,9 @@ def cmd_listen(cfg: Config, args: argparse.Namespace) -> int:
     # Guards the worker-cycle so only one runs at a time (Store is locked, but we
     # avoid piling up cycles that would just contend on the DB).
     cycle_thread: Optional[threading.Thread] = None
-    last_trading_day: list[date] = [session_info().trading_day]
+    # The label of the last *completed* A1 day, so a daemon started on a
+    # weekend still finalizes Friday instead of the upcoming session.
+    last_trading_day: list[date] = [last_session()]
 
     def maybe_cycle() -> None:
         nonlocal cycle_thread
@@ -433,16 +435,20 @@ def _finalize_if_closed(rt: "Runtime", last_trading_day: "list[date]") -> None:
     The daemon never otherwise calls ``finalize_day``, so without this the runner
     list and the daily MISS REPORT (the honest accounting of which sub-$10 names
     ran and why ROTD did/didn't flag them) would never be built or pushed. We
-    finalize the day we were last trading on as soon as we observe a non-session
-    mode (CLOSED/OVERNIGHT boundary) or a new trading day, and only once per day.
+    finalize the day we were last trading on as soon as its A1 label rolls
+    (16:00 ET), and only once per day.
     """
     si = session_info()
     prev = last_trading_day[0] if last_trading_day else None
     if prev is None:
         last_trading_day[:] = [si.trading_day]
         return
-    # A new trading day (or we're in a closed window) means the previous day is done.
-    day_ended = (si.trading_day != prev) or (not si.is_session)
+    # An A1 label only rolls at 16:00 ET, i.e. once the session that completes it
+    # has closed. "not si.is_session" is not equivalent: on a weekend/holiday
+    # start the label has already rolled to the *upcoming* session, so that test
+    # finalizes a day that has not happened (wrong label, and the real report is
+    # then skipped as already built).
+    day_ended = si.trading_day != prev
     if day_ended and store_day_closed(rt.store, prev):
         try:
             report = rt.finalize_day(prev)
@@ -457,17 +463,28 @@ def _finalize_if_closed(rt: "Runtime", last_trading_day: "list[date]") -> None:
 
 
 def store_day_closed(store: "Store", day: "date") -> bool:
-    """True once we've recorded a POST-session snapshot / the day is marked closed."""
-    # Cheap heuristic: a miss report for the day already exists -> don't re-finalize.
-    existing = store.get_miss_report(day)
-    if existing:
+    """True when ``day`` has data and no report yet (i.e. it is due a finalize).
+
+    A report already built means it is done. No snapshot at all means the daemon
+    never observed that label (fresh install, or it was down all day) — building
+    a report then would attribute the *current* universe to a past day.
+    """
+    if store.get_miss_report(day):
         return False
-    return True
+    return store.query_one(
+        "SELECT 1 FROM snapshots WHERE trading_day=? LIMIT 1",
+        (day.isoformat(),)) is not None
 
 
 def _listen_reply(cfg, store, tg, offset, wait_s, rt=None) -> int:
-    """Drain queued Telegram commands (short poll) and reply. Returns new offset."""
-    ctx = {"store": store, "cfg": cfg, "runtime": rt}
+    """Drain queued Telegram commands (short poll) and reply. Returns new offset.
+
+    Every message is passed to :func:`handle_command`, which resolves the sender
+    to owner / subscriber / expired / unknown. Unknown senders get ``None`` and
+    therefore no reply and no typing indicator (fail closed, no enumeration).
+    """
+    ctx = {"store": store, "cfg": cfg, "runtime": rt,
+           "notifier": getattr(rt, "notifier", None)}
     if cfg.raw("TELEGRAM_TOKEN") and not isinstance(tg, FakeTelegram):
         updates = tg.get_updates(offset=offset, timeout=wait_s)
     else:
@@ -485,10 +502,14 @@ def _listen_reply(cfg, store, tg, offset, wait_s, rt=None) -> int:
             # take down the daemon; ack the update and apologise instead.
             log.error("listen: command %r failed: %s", text[:40], exc)
             offset = max(offset, int(upd.get("update_id", 0)) + 1)
-            try:
-                tg.send("⚠️ command error (logged); try /help", chat_id=sender or None)
-            except Exception:  # noqa: BLE001
-                pass
+            # Only answer a chat that already has access, so an unknown sender
+            # cannot probe the bot by triggering an error.
+            owner = str(cfg.raw("TELEGRAM_CHAT_ID") or "")
+            if sender and (sender == owner or store.is_active(sender)):
+                try:
+                    tg.send("⚠️ command error (logged); try /help", chat_id=sender)
+                except Exception:  # noqa: BLE001
+                    pass
             continue
         if reply is not None:
             # Show "typing" for a beat, then send — feels responsive on slow cycles.
@@ -757,6 +778,58 @@ def cmd_telegram_menu(cfg: Config, args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def cmd_subs(cfg: Config, args: argparse.Namespace) -> int:
+    """Manage read-only Telegram subscribers without going through the bot.
+
+    ``rotd subs list`` | ``rotd subs add CHAT_ID DAYS [LABEL]`` | ``rotd subs rm CHAT_ID``
+    """
+    store = Store(cfg.db_path)
+    try:
+        if args.action == "add":
+            if not args.chat_id or args.days is None:
+                print("usage: rotd subs add CHAT_ID DAYS [LABEL]")
+                return 2
+            try:
+                expires = store.add_subscriber(args.chat_id, args.days, args.label or "")
+            except ValueError as exc:
+                print(str(exc))
+                return 2
+            print(f"✅ Subscriber {args.chat_id} added/renewed for {args.days} days "
+                  f"(expires {expires.isoformat()}).")
+            return 0
+        if args.action == "rm":
+            if not args.chat_id:
+                print("usage: rotd subs rm CHAT_ID")
+                return 2
+            if not store.remove_subscriber(args.chat_id):
+                print(f"no subscriber with chat id {args.chat_id}")
+                return 1
+            print(f"🗑️ Subscriber {args.chat_id} removed.")
+            return 0
+        today = now_utc().date()
+        rows = store.all_subscribers()
+        print("👥 ROTD Subscribers:")
+        active = 0
+        for r in rows:
+            exp = str(r["expires_at"])
+            try:
+                left = (date.fromisoformat(exp) - today).days
+            except ValueError:
+                left = -1
+            label = f" ({r['label']})" if r["label"] else ""
+            if left >= 0:
+                active += 1
+                print(f"- {r['chat_id']}{label}: Active, {left} days left (exp {exp})")
+            else:
+                print(f"- {r['chat_id']}{label}: EXPIRED (exp {exp})")
+        if not rows:
+            print("- none")
+        print(f"Total active: {active}")
+        return 0
+    finally:
+        store.close()
+
+
 def cmd_config(cfg: Config, args: argparse.Namespace) -> int:
     if args.key:
         if args.key not in {s.key for s in __import__("rotd.config", fromlist=["SETTINGS"]).SETTINGS}:
@@ -801,6 +874,14 @@ def build_parser() -> argparse.ArgumentParser:
     ls = sub.add_parser("listen", help="daemon: run cycles AND answer Telegram commands")
     ls.add_argument("--once", action="store_true", help="one pass then exit (tests)")
     ls.set_defaults(func=cmd_listen)
+
+    sb = sub.add_parser("subs", help="list / add / remove read-only Telegram subscribers")
+    sb.add_argument("action", nargs="?", default="list",
+                    choices=["list", "add", "rm"], help="default: list")
+    sb.add_argument("chat_id", nargs="?")
+    sb.add_argument("days", nargs="?", type=int)
+    sb.add_argument("label", nargs="?")
+    sb.set_defaults(func=cmd_subs)
 
     rp = sub.add_parser("replay", help="re-run a stored day")
     rp.add_argument("date")

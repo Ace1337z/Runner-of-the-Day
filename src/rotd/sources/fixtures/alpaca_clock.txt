@@ -1,7 +1,1 @@
-<html>
-<head><title>401 Authorization Required</title></head>
-<body>
-<center><h1>401 Authorization Required</h1></center>
-<hr><center>nginx</center>
-</body>
-</html>
+{"is_open":false,"next_close":"2026-10-19T16:00:00-04:00","next_open":"2026-10-19T09:30:00-04:00","timestamp":"2026-10-17T21:53:32.815600559-04:00"}

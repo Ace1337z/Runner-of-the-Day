@@ -217,8 +217,7 @@ SETTABLE_KEYS = (
     "ALPACA_KEY", "ALPACA_SECRET", "AI_KEY", "AI_BASE_URL", "AI_MODEL",
 )
 
-# Every command the bot understands. Owner-chat only. `setkey`/`start`/`help`
-# work without a DB; the data commands take an optional context with the store.
+# Every command the bot understands. Owner-only unless in READONLY_COMMANDS.
 COMMANDS = (
     ("/start", "wake the bot and show the command menu"),
     ("/help", "list every command"),
@@ -226,6 +225,12 @@ COMMANDS = (
     ("/setbudget N", "set the daily IGNITION alert budget (1..10, applied immediately)"),
     ("/resetbudget", "clear today's spent IGNITION slots (budget back to 0/N)"),
     ("/keys", "show which API keys are set and which are missing"),
+    ("/addsub CHAT_ID DAYS [LABEL]", "grant a read-only subscription (renews if known)"),
+    ("/rmsub CHAT_ID", "revoke a subscription immediately"),
+    ("/subs", "list subscribers with status and days left"),
+    ("/broadcast MESSAGE", "send an announcement to the owner and all subscribers"),
+    ("/shadow-start [YYYY-MM-DD]", "start the 10-trading-day shadow clock"),
+    ("/setup", "how to re-run the installer (host shell only)"),
     ("/status", "now, session mode, shadow clock and alert budget used"),
     ("/board", "the latest ranked board (top candidates)"),
     ("/runners", "today's runner list (big movers)"),
@@ -236,10 +241,22 @@ COMMANDS = (
     ("/doctor", "live checker: config, sources, calendar, clock"),
 )
 
+# Two-tier access. Anything not listed here is admin-only, so a new command is
+# locked to the owner by default (fail closed).
+READONLY_COMMANDS = frozenset({"status", "board", "runners", "miss", "alerts"})
+PUBLIC_COMMANDS = frozenset({"start", "help"})
+EXPIRED_REPLY = "⚠️ Your subscription expired on {date}. Contact admin to renew."
 
-def _usage() -> str:
+
+def _usage(role: str = "admin") -> str:
+    if role == "admin":
+        rows = COMMANDS
+    else:
+        allowed = READONLY_COMMANDS | PUBLIC_COMMANDS
+        rows = tuple(c for c in COMMANDS
+                     if c[0].lstrip("/").split()[0] in allowed)
     return ("ROTD commands:\n"
-            + "\n".join(f"  {c[0]:<20} {c[1]}" for c in COMMANDS))
+            + "\n".join(f"  {c[0]:<20} {c[1]}" for c in rows))
 
 
 def menu_commands() -> list[tuple[str, str]]:
@@ -299,24 +316,89 @@ def used_today(ctx: Optional[dict], cfg: "Config") -> int:
     return 0
 
 
+def _sender_role(self, sender_chat: str, cfg: "Config",
+                 ctx: Optional[dict]) -> tuple[str, Optional[str]]:
+    """Resolve a sender to ``(role, expired_on)``.
+
+    ``owner``      — ``TELEGRAM_CHAT_ID``: every command.
+    ``subscriber`` — an active row in ``subscribers``: read-only commands.
+    ``expired``    — a known chat whose subscription lapsed.
+    ``unknown``    — anything else: no reply at all (fail closed).
+    """
+    owner = str(cfg.raw("TELEGRAM_CHAT_ID") or self.chat_id or "").strip()
+    sender = str(sender_chat).strip()
+    if not sender:
+        return "unknown", None
+    if owner and sender == owner:
+        return "owner", None
+    store = (ctx or {}).get("store")
+    if store is not None:
+        try:
+            if store.is_active(sender):
+                return "subscriber", None
+            expiry = store.subscriber_expiry(sender)
+            if expiry:
+                return "expired", expiry
+        except Exception as exc:  # noqa: BLE001 - a DB hiccup must deny, not allow
+            log.warning("subscriber lookup failed: %s", exc)
+    # No owner configured yet (fresh install): allow the wake-up commands only,
+    # so the first person to message the bot can read its chat id and finish setup.
+    if not owner:
+        return "bootstrap", None
+    return "unknown", None
+
+
+def _broadcast(self, text: str, cfg: "Config", ctx: Optional[dict]) -> str:
+    """Owner announcement to the owner + every active subscriber."""
+    rest = text[1:].split(None, 1)
+    body = rest[1].strip() if len(rest) > 1 else ""
+    if not body:
+        return "⚠️ Usage: /broadcast <your announcement message>"
+    notifier = (ctx or {}).get("notifier")
+    if notifier is None:
+        from .notifier import Notifier
+        notifier = Notifier(cfg, self, (ctx or {}).get("store"))
+    try:
+        success, fail = notifier.send_custom_broadcast(body)
+    except ValueError as exc:
+        return f"⚠️ {exc}"
+    return f"📢 Broadcast sent! Delivered to {success} chat(s) ({fail} failed)."
+
+
 def handle_command(self, text: str, sender_chat: str, cfg: "Config",
                    ctx: Optional[dict] = None) -> Optional[str]:
-    """Process one inbound Telegram command from the configured owner chat.
+    """Process one inbound Telegram command.
 
     Returns a human-readable reply string, or ``None`` if the message was not a
-    command for this bot. Commands are accepted only from ``TELEGRAM_CHAT_ID``
-    (the installer writes it); other chats are ignored silently. ``ctx`` is an
-    optional dict ``{"store": Store, "cfg": Config}`` that lets data commands read
-    live state. ``setkey``/``start``/``help`` work without it.
+    command for this bot. Access is two-tier: ``TELEGRAM_CHAT_ID`` is the owner
+    (every command); active rows in ``subscribers`` get the read-only set. An
+    expired subscriber is told once, by date. Any other chat is ignored silently.
+    ``ctx`` is an optional dict ``{"store": Store, "cfg": Config}`` that lets data
+    commands read live state.
     """
     if not text or not text.startswith("/"):
         return None
-    if self.chat_id and str(sender_chat) != self.chat_id:
-        # Not the owner chat: ignore silently (don't leak a "denied" message).
-        return None
     parts = text[1:].split()
     name = parts[0].lower().split("@")[0]
-    arg = " ".join(parts[1:]).strip()
+    role, expired_on = _sender_role(self, sender_chat, cfg, ctx)
+    if role == "unknown":
+        return None
+    if name == "broadcast":
+        # Handled before the generic gate so a subscriber gets the explicit
+        # refusal the brief asks for; everyone else is ignored silently.
+        if role == "owner":
+            return _broadcast(self, text, cfg, ctx)
+        if role == "subscriber":
+            return "⛔ Admin command only."
+        return None
+    if role == "bootstrap" and name not in PUBLIC_COMMANDS:
+        return None
+    if role in ("subscriber", "expired") and name not in (READONLY_COMMANDS
+                                                          | PUBLIC_COMMANDS):
+        # Admin commands are owner-only. Don't hint at what exists.
+        return "Unauthorized."
+    if role == "expired":
+        return EXPIRED_REPLY.format(date=expired_on)
 
     if name in ("start", "help"):
         # Self-heal the slash menu: the bot token is shared with a sibling system,
@@ -326,6 +408,24 @@ def handle_command(self, text: str, sender_chat: str, cfg: "Config",
             self.set_commands(menu_commands())
         except Exception:  # noqa: BLE001 - menu is cosmetic; never block the reply
             pass
+        if role == "bootstrap":
+            return ("ROTD — Runner of the Day.\n"
+                    f"Your chat id is {sender_chat}. Add it as TELEGRAM_CHAT_ID "
+                    "(or run `rotd setup`) to finish setup.")
+        if role == "subscriber":
+            from .notifier import render_subscriber_welcome
+            from datetime import date as _d
+            sub = ((ctx or {}).get("store") or None)
+            row = sub.get_subscriber(sender_chat) if sub is not None else None
+            if row is None:
+                return "ROTD — Runner of the Day. You have read-only access.\n" \
+                       + _usage("subscriber")
+            expires = str(row["expires_at"])
+            try:
+                days_left = max(0, (_d.fromisoformat(expires) - now_utc().date()).days)
+            except ValueError:
+                days_left = 0
+            return render_subscriber_welcome(days_left, expires)
         return ("ROTD — Runner of the Day. Watching the sub-$10 universe.\n"
                 + _usage()
                 + "\n\nSet a key any time, e.g. /setkey FINVIZ_TOKEN <token>")
@@ -347,6 +447,76 @@ def handle_command(self, text: str, sender_chat: str, cfg: "Config",
         except Exception as exc:  # noqa: BLE001
             return f"error saving {key}: {scrub(str(exc), self._secrets)}"
         return f"ok: {key} updated (applied on next cycle)"
+
+    if name == "addsub":
+        if len(parts) < 3:
+            return "usage: /addsub CHAT_ID DAYS [LABEL]"
+        store = (ctx or {}).get("store")
+        if store is None:
+            return "subscribers need the database; start the listener first."
+        try:
+            days = int(parts[2])
+        except ValueError:
+            return f"invalid days: {parts[2]!r}"
+        label = " ".join(parts[3:]).strip()
+        try:
+            expires = store.add_subscriber(parts[1], days, label)
+        except ValueError as exc:
+            return str(exc)
+        head = (f"✅ Subscriber {parts[1]} ({label or 'no label'}) activated for "
+                f"{days} days (expires {expires.isoformat()}).")
+        # Push the playbook immediately so the new subscriber knows the rules
+        # before the first IGNITION lands. A chat that has never messaged the bot
+        # cannot be opened by the bot; that is a "retry on /start" case, not a
+        # failure of the subscription itself.
+        from .notifier import Notifier, render_subscriber_welcome
+        notifier = (ctx or {}).get("notifier")
+        if notifier is None:
+            notifier = Notifier(cfg, self, store)
+        try:
+            notifier._send_raw(parts[1], render_subscriber_welcome(days, expires.isoformat()))
+        except Exception as exc:  # noqa: BLE001 - subscription already saved
+            log.warning("addsub: welcome to %s failed: %s", parts[1], exc)
+            return (head + " Note: Welcome playbook will be delivered once the "
+                    "user sends /start to the bot.")
+        return head + " Welcome playbook delivered."
+
+    if name == "rmsub":
+        if len(parts) < 2:
+            return "usage: /rmsub CHAT_ID"
+        store = (ctx or {}).get("store")
+        if store is None:
+            return "subscribers need the database; start the listener first."
+        if not store.remove_subscriber(parts[1]):
+            return f"no subscriber with chat id {parts[1]}"
+        return f"🗑️ Subscriber {parts[1]} removed."
+
+    if name == "subs":
+        store = (ctx or {}).get("store")
+        if store is None:
+            return "subscribers need the database; start the listener first."
+        from datetime import date as _d
+        today = now_utc().date()
+        rows = store.all_subscribers()
+        lines = ["👥 ROTD Subscribers:"]
+        active = 0
+        for r in rows:
+            exp = str(r["expires_at"])
+            try:
+                left = (_d.fromisoformat(exp) - today).days
+            except ValueError:
+                left = -1
+            label = f" ({r['label']})" if r["label"] else ""
+            if left >= 0:
+                active += 1
+                lines.append(f"- {r['chat_id']}{label}: Active, {left} days left "
+                             f"(exp {exp})")
+            else:
+                lines.append(f"- {r['chat_id']}{label}: EXPIRED (exp {exp})")
+        if not rows:
+            lines.append("- none")
+        lines.append(f"Total active: {active}")
+        return "\n".join(lines)
 
     if name == "setbudget":
         if len(parts) < 2:
@@ -411,6 +581,30 @@ def handle_command(self, text: str, sender_chat: str, cfg: "Config",
         st = shadow_status(None, cfg=cfg) if not ctx else \
             shadow_status(ctx["store"], cfg=cfg)
         return f"Shadow clock\n  {st.line()}"
+
+    if name in ("shadow-start", "shadowstart"):
+        store = (ctx or {}).get("store")
+        if store is None:
+            return "the shadow clock needs the database; start the listener first."
+        from . import shadow as _shadow
+        from datetime import date as _d
+        tokens = [p for p in parts[1:] if p != "--force"]
+        force = "--force" in parts[1:]
+        try:
+            day = _d.fromisoformat(tokens[0]) if tokens else session_info().trading_day
+        except ValueError:
+            return f"bad date: {tokens[0]!r} (want YYYY-MM-DD)"
+        try:
+            st = _shadow.start(store, day, force=force)
+        except ValueError as exc:
+            return str(exc)
+        store.set_meta("shadow_enabled", "1")
+        return f"shadow clock started on {day}\n  {st.line()}"
+
+    if name == "setup":
+        return ("`/setup` runs on the host, not in Telegram: "
+                "`cd /opt/rotd && ./install.sh` (or `rotd setup`). "
+                "Use /setkey to change a key from here.")
 
     if name == "board":
         if not ctx or not ctx.get("store"):
@@ -496,7 +690,8 @@ def handle_command(self, text: str, sender_chat: str, cfg: "Config",
                 "logs with `journalctl -u rotd -f`. Quick status: "
                 + ("shadow ON" if cfg.bool("SHADOW") else "shadow OFF"))
 
-    # Unknown command from the owner chat: nudge toward /help.
+    # Unknown command from the owner chat: nudge toward /help. Subscribers never
+    # reach here (anything outside the read-only set is refused above).
     return f"unknown command: /{name}\n" + _usage()
 
 
@@ -542,7 +737,8 @@ class FakeTelegram:
     def send(self, text: str, chat_id: Optional[str] = None, disable_preview: bool = True,
              markup: Optional[dict] = None, *, silent: bool = False) -> int:
         self._next_id += 1
-        msg = {"id": self._next_id, "text": text, "markup": markup, "silent": silent}
+        msg = {"id": self._next_id, "text": text, "markup": markup, "silent": silent,
+               "chat": str(chat_id or self.chat_id or "")}
         self.messages.append(msg)
         self.sent.append(msg)
         return self._next_id

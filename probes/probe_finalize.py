@@ -17,6 +17,7 @@ from rotd.config import Config
 from rotd.telegram import FakeTelegram
 from rotd.store import Store
 from rotd.cli import _finalize_if_closed
+from rotd.util import last_session
 
 
 def main() -> int:
@@ -27,7 +28,10 @@ def main() -> int:
     store = Store(Path(d) / "rotd.db")
 
     # 'yesterday' had a runner that ROTD never alerted (the user's exact scenario).
-    yday = date.today() - timedelta(days=1)
+    # The last completed A1 label (on a weekend that is Friday, not yesterday).
+    yday = last_session(date.today() - timedelta(days=1))
+    store.save_snapshot(yday, "OPEN", __import__("rotd.util", fromlist=["now_utc"]).now_utc(),
+                        "B", {"half_day": False}, "h", 10)
     store.save_runner(yday, "ZRUN", 1.0, 2.5, 150.0, 8_000_000, False, True, None)
     assert store.get_miss_report(yday) is None, "precondition: no report yet"
 

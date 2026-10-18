@@ -160,8 +160,41 @@ def render_miss_report(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def render_subscriber_welcome(days: int, expires_at: str) -> str:
+    """The welcome + trading playbook a subscriber gets on activation and /start."""
+    return (
+        f"👋 Welcome to ROTD (Runner of the Day) Alerts!\n\n"
+        f"Your access has been activated for {days} day(s) (valid through {expires_at}).\n\n"
+        f"🚨 HOW TO TRADE IGNITION ALERTS:\n"
+        f"1. DO NOT BLINDLY MARKET-BUY:\n"
+        f"   An ignition alert signals explosive momentum RIGHT NOW, not an automatic market buy.\n\n"
+        f"2. PULL UP THE CHART (First 30-60s):\n"
+        f"   Check 1m and 5m candles, Alert Price, High of Day (HOD), and VWAP.\n\n"
+        f"3. TWO VALID ENTRIES:\n"
+        f"   • Pullback Entry (Recommended): Wait for the initial spike to consolidate for 2-4 candles. "
+        f"Enter on a clean bounce off VWAP or support on declining sell volume.\n"
+        f"   • HOD Breakout: Enter as price breaks cleanly through High of Day with heavy tape velocity.\n\n"
+        f"4. STRICT RISK RULES:\n"
+        f"   • Always set your stop loss below VWAP or the pullback pivot.\n"
+        f"   • Scale out into strength (+10% to +15%) and move stop to breakeven.\n"
+        f"   • Exit immediately if an ⚠️ ABORT alert is received.\n\n"
+        f"💡 Commands you can use:\n"
+        f"/board   — View today's top 5 ranked momentum candidates\n"
+        f"/status  — Check market session & system health\n"
+        f"/runners — View today's biggest percentage movers\n"
+        f"/miss    — View the daily runner accuracy report\n"
+        f"/alerts  — Today's ignition alerts\n"
+        f"/help    — Show this trading playbook anytime"
+    )
+
+
 class Notifier:
-    """Sends messages through a client, honouring shadow mode."""
+    """Sends messages through a client, honouring shadow mode.
+
+    Every push fans out to the owner chat plus every active subscriber. Each
+    recipient is isolated: one blocked/deleted chat logs a warning and the rest
+    of the delivery still happens.
+    """
 
     def __init__(self, cfg: Config, client, store=None):
         self.cfg = cfg
@@ -172,19 +205,46 @@ class Notifier:
     def shadow(self) -> bool:
         return self.cfg.bool("SHADOW", False)
 
+    def _recipients(self) -> list[str]:
+        """Owner first, then active subscribers (owner de-duplicated)."""
+        owner = str(self.cfg.raw("TELEGRAM_CHAT_ID") or
+                    getattr(self.client, "chat_id", "") or "").strip()
+        out = [owner] if owner else []
+        if self.store is not None:
+            try:
+                for chat in self.store.get_active_subscribers():
+                    if chat and chat not in out:
+                        out.append(chat)
+            except Exception as exc:  # noqa: BLE001 - a bad row must not stop a push
+                log.warning("subscriber lookup failed: %s", exc)
+        return out
+
+    def _send_raw(self, chat_id: str, text: str) -> Optional[int]:
+        """Send one message to one chat. Raises on failure (caller decides)."""
+        return self.client.send(text, chat_id=str(chat_id) or None)
+
     def _send(self, text: str, silent: bool = False) -> Optional[int]:
         if self.shadow:
             log.info("[shadow] would send:\n%s", text)
             if self.store:
                 self.store.log_event("INFO", "notifier", f"[shadow] {text.splitlines()[0]}")
             return None
-        try:
-            return self.client.send(text, silent=silent)
-        except Exception as exc:  # noqa: BLE001
-            log.error("send failed: %s", exc)
-            if self.store:
-                self.store.log_event("ERROR", "notifier", str(exc))
-            return None
+        owner = str(self.cfg.raw("TELEGRAM_CHAT_ID") or
+                    getattr(self.client, "chat_id", "") or "").strip()
+        msg_id: Optional[int] = None
+        for chat in self._recipients():
+            try:
+                sent = self.client.send(text, chat_id=chat or None, silent=silent)
+                if chat == owner:
+                    msg_id = sent
+            except Exception as exc:  # noqa: BLE001 - per-recipient isolation
+                if chat == owner:
+                    log.error("send failed: %s", exc)
+                    if self.store:
+                        self.store.log_event("ERROR", "notifier", str(exc))
+                else:
+                    log.warning("subscriber %s send failed: %s", chat, exc)
+        return msg_id
 
     def ignition(self, symbol: str, scored: Scored, rec: Any, slot: str, mode: str,
                  reasons: list[str], now: Optional[datetime] = None) -> Optional[int]:
@@ -204,3 +264,26 @@ class Notifier:
 
     def miss_report(self, report: dict[str, Any]) -> Optional[int]:
         return self._send(render_miss_report(report), silent=True)
+
+    def send_custom_broadcast(self, text: str) -> tuple[int, int]:
+        """Send an owner announcement to the owner + every active subscriber.
+
+        Returns ``(delivered, failed)``. A blocked/deleted chat counts as failed
+        and never stops the rest of the delivery.
+        """
+        body = (text or "").strip()
+        if not body:
+            raise ValueError("broadcast: empty message")
+        message = f"📢 ROTD ANNOUNCEMENT\n\n{body}"
+        # No shadow gate: SHADOW suppresses automated decision pushes, not a
+        # message the owner explicitly typed. /setkey and /setbudget behave the
+        # same way, so the rule is "commands act, decisions wait".
+        delivered = failed = 0
+        for chat in self._recipients():
+            try:
+                self._send_raw(chat, message)
+                delivered += 1
+            except Exception as err:  # noqa: BLE001 - one bad chat must not stop the rest
+                log.warning("broadcast failed for %s: %s", chat, err)
+                failed += 1
+        return delivered, failed

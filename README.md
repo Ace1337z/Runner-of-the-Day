@@ -143,7 +143,9 @@ release:
   `CAND_JSON_TOP_N`, `MEMORY_TTL_S`, `VOL_HISTORY_RESTORE_MIN`,
   `ALERT_BUDGET_MIN/MAX`. `rotd config KEY` prints any of them.
 - **The database migrates itself** on first start (WAL, indexes, retention
-  window, `auto_vacuum`). No manual SQL.
+  window, `auto_vacuum`). No manual SQL. The `subscribers` table is created by
+  the same migration; existing installs start with an empty guest list, so
+  behaviour is unchanged until the owner runs `/addsub`.
 
 ### Reclaiming a bloated database (one time)
 
@@ -200,6 +202,7 @@ rotd finalize        # end of day: runner list + MISS REPORT
 rotd miss            # print the MISS REPORT for a day
 rotd status          # current day, state machine, budget used
 rotd replay DATE     # re-run a stored day through the same code
+rotd subs            # list Telegram subscribers and days left
 ```
 
 ## How it works
@@ -346,6 +349,8 @@ manual commands; `listen` is what the systemd unit runs.
 > `/miss` reads it; `rotd finalize [YYYY-MM-DD]` rebuilds it on demand. A name that
 > "ran" but ROTD never alerted shows up in the MISS REPORT as a *missed* runner with
 > the reason it was gated (e.g. `G-DATA=STALE`), rather than being silently dropped.
+> A daemon started on a weekend or holiday finalizes the last *completed* session
+> (e.g. Friday), never the upcoming one.
 
 ```mermaid
 flowchart TD
@@ -359,9 +364,9 @@ flowchart TD
     H --> I[state machine WATCH->QUALIFIED->BOARD->ARMED->IGNITION]
     I --> J{live volume + HOD + shadow clock OK?}
     J -- no --> K[log only, never push]
-    J -- yes --> L[push IGNITION/BOARD/ROTD to Telegram]
-    A -->|long-poll getUpdates| M[owner chat command]
-    M --> N[handle_command: /setkey /setbudget /resetbudget /status /board /runners /miss /alerts /shadow /log /keys /doctor]
+    J -- yes --> L[push IGNITION/BOARD/ROTD to owner + active subscribers]
+    A -->|long-poll getUpdates| M[inbound Telegram command]
+    M --> N[handle_command: owner = all, subscriber = read-only, unknown = silent]
     N --> O[reply via send]
     L --> P[(SQLite: snapshots, candidates, alerts, outcomes, MISS REPORT)]
     K --> P
@@ -458,24 +463,97 @@ Quiet day: no names ran, and ROTD stayed silent. That is a correct outcome, not 
 
 ### Telegram commands
 
-All commands are accepted only from the configured `TELEGRAM_CHAT_ID` (the
-installer writes it). Any other chat is ignored silently.
+Access is two-tier. `TELEGRAM_CHAT_ID` is the **owner** and keeps every command.
+Chat ids in the `subscribers` table get the **read-only** set and receive every
+alert. Anyone else is ignored silently — no reply, no "denied", nothing to
+enumerate.
 
-| Command | What it does |
-| --- | --- |
-| `/start`, `/help` | Show the command menu |
-| `/setkey KEY VALUE` | Set one of the 8 allowlisted keys after install (secrets saved, not echoed) |
-| `/setbudget N` | Set the daily IGNITION budget (1–10). Persisted and applied immediately, no restart |
-| `/resetbudget` | Clear today's spent IGNITION slots — deletes today's `IGNITION` rows and resets the in-memory budget to `0/N` |
-| `/keys` | Show which API keys are set vs missing |
-| `/status` | Now, session mode, shadow clock, alert budget used |
-| `/board` | The latest ranked board (top candidates) |
-| `/runners` | Today's runner list (big movers) |
-| `/miss` | Today's MISS REPORT (auto-built at session close; the honest "which names ran and why ROTD did/didn't flag them") |
-| `/alerts` | Today's ignition alerts |
-| `/shadow` | The 10-trading-day shadow clock |
-| `/log` | Recent event log |
-| `/doctor` | Live checker hint (run `rotd doctor` for the full report) |
+| Command | Owner | Subscriber | What it does |
+| --- | :---: | :---: | --- |
+| `/start`, `/help` | ✓ | ✓ | Show the command menu (the subscriber menu lists only the read-only set) |
+| `/status` | ✓ | ✓ | Now, session mode, shadow clock, alert budget used |
+| `/board` | ✓ | ✓ | The latest ranked board (top candidates) |
+| `/runners` | ✓ | ✓ | Today's runner list (big movers) |
+| `/miss` | ✓ | ✓ | Today's MISS REPORT (auto-built at session close; the honest "which names ran and why ROTD did/didn't flag them") |
+| `/alerts` | ✓ | ✓ | Today's ignition alerts |
+| `/setkey KEY VALUE` | ✓ | — | Set one of the 8 allowlisted keys after install (secrets saved, not echoed) |
+| `/setbudget N` | ✓ | — | Set the daily IGNITION budget (1–10). Persisted and applied immediately, no restart |
+| `/resetbudget` | ✓ | — | Clear today's spent IGNITION slots — deletes today's `IGNITION` rows and resets the in-memory budget to `0/N` |
+| `/keys` | ✓ | — | Show which API keys are set vs missing |
+| `/addsub CHAT_ID DAYS [LABEL]` | ✓ | — | Grant or renew a subscription; expiry is today + DAYS |
+| `/rmsub CHAT_ID` | ✓ | — | Revoke a subscription immediately |
+| `/subs` | ✓ | — | List subscribers with status and days left |
+| `/broadcast MESSAGE` | ✓ | — | Send an announcement to the owner and every active subscriber, then report `Delivered to N chat(s) (M failed)` |
+| `/shadow-start [YYYY-MM-DD]` | ✓ | — | Start the 10-trading-day shadow clock (`--force` restarts) |
+| `/shadow` | ✓ | — | The 10-trading-day shadow clock |
+| `/setup` | ✓ | — | Points at the host installer (`/setup` cannot run on the host from Telegram) |
+| `/log` | ✓ | — | Recent event log |
+| `/doctor` | ✓ | — | Live checker hint (run `rotd doctor` for the full report) |
+
+A subscriber command that is not in the read-only set answers `Unauthorized.`;
+the owner is never refused. An expired subscriber gets exactly one line for a
+read-only command and nothing else:
+
+```
+⚠️ Your subscription expired on 2026-10-15. Contact admin to renew.
+```
+
+Admin commands from a lapsed chat still answer `Unauthorized.` (the expiry date
+is not shown for a command they could never run).
+
+### Subscribers (time-bound read-only access)
+
+The owner can hand out temporary access — friends, clients, a trial — without
+giving away the keys or the budget. Subscribers receive every outbound message
+(IGNITION, BOARD, ABORT, ROTD, MISS REPORT) and can run the read-only commands.
+They cannot change a key, the budget, or the shadow clock.
+
+Storage is a table in the same `rotd.db`:
+
+```sql
+CREATE TABLE IF NOT EXISTS subscribers (
+    chat_id TEXT PRIMARY KEY,
+    expires_at TEXT NOT NULL,  -- ISO date 'YYYY-MM-DD' (UTC)
+    label TEXT DEFAULT '',
+    created_at TEXT NOT NULL
+);
+```
+
+From Telegram (owner only):
+
+```
+/addsub 123456789 30 Dave      # ✅ Subscriber 123456789 (Dave) activated for 30 days (expires 2026-11-17). Welcome playbook delivered.
+/subs                          # 👥 ROTD Subscribers: … Total active: 1
+/rmsub 123456789               # 🗑️ Subscriber 123456789 removed.
+/broadcast market closes 13:00 # 📢 Broadcast sent! Delivered to 4 chat(s) (0 failed).
+```
+
+`/addsub` immediately pushes the welcome playbook (how to trade an IGNITION:
+pullback vs HOD breakout, VWAP stop, scaling out, ABORT handling) to the new
+chat. If the bot has never been messaged by that chat it cannot open the DM;
+the subscription is still saved and the owner is told the playbook will arrive
+on the user's first `/start`. Active subscribers get the same playbook from
+`/start` and `/help` (with their remaining days), so it can never be lost.
+`/addsub` and `/broadcast` are messages the owner typed, so they send even while
+`SHADOW=1`; shadow suppresses automated decision pushes, not commands.
+
+Or from the host, which is the same table and the same rules (the CLI path does
+not DM the playbook — it arrives on the user's first `/start`):
+
+```
+rotd subs                                  # list
+rotd subs add 123456789 30 Dave            # add or renew
+rotd subs rm 123456789                     # revoke now
+```
+
+Expiry is checked on **every** message and every broadcast with
+`date('now') <= expires_at`, so a lapsed row stops receiving alerts the moment
+the UTC date passes — no restart, no cron. Renewing an existing chat id just
+moves the date forward; the label is kept unless a new one is given.
+
+Delivery is per recipient: if one subscriber blocks the bot or their chat id is
+wrong, the failure is logged as a warning and every other recipient still gets
+the message. The owner's copy is never dropped because of a subscriber.
 
 To add a source after install, e.g. the only key that makes ROTD produce
 candidates:
@@ -730,7 +808,7 @@ only gains `auto_vacuum` after a full `VACUUM` or a fresh file — see
 ### Runtime & shadow clock
 | Setting | Default | Unit | Meaning |
 |---|---|---|---|
-| `SHADOW` | `0` | bool | 1 = decide and log but never push (`rotd shadow`). |
+| `SHADOW` | `0` | bool | 1 = decide and log but never push (`rotd shadow`). Automated alerts only; owner commands (`/setkey`, `/addsub`, `/broadcast`) still act. |
 | `SHADOW_DAYS_REQUIRED` | `10` | trading_days | Shadow-clock length before live pushes allowed. |
 | `SHADOW_AUTOSTART` | `0` | bool | 1 = start the clock on the first shadow cycle. |
 | `SHADOW_RUN_WHEN_CLOSED` | `1` | bool | 1 = keep running cycles outside NYSE sessions (off-thread, so commands stay responsive). |

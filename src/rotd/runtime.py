@@ -321,6 +321,10 @@ class Runtime:
         spread penalty) has been MISSING. One ``/v2/stocks/quotes/latest`` call
         covers up to 40 symbols. Fail soft: a blocked/rejected key leaves the
         records exactly as reconciled.
+
+        A quote older than the mode's ``QUOTE_MAX_AGE_S_*`` is skipped (DATA-03):
+        the IEX book outside regular hours can be hours old and 10% wide, and a
+        stale spread is worse than no spread.
         """
         al = self.clients.get("alpaca")
         if al is None or not self.cfg.raw("ALPACA_KEY"):
@@ -330,10 +334,18 @@ class Runtime:
         except Exception as exc:  # noqa: BLE001 - optional feed, never a cycle error
             log.debug("alpaca quotes unavailable: %s", exc)
             return
+        max_age = (self.cfg.float("QUOTE_MAX_AGE_S_REG", 20)
+                   if snap.mode in ("OPEN", "MIDDAY")
+                   else self.cfg.float("QUOTE_MAX_AGE_S_EXT", 60))
         for sym, q in quotes.items():
             rec = snap.records.get(sym)
             bid, ask = q.get("bid"), q.get("ask")
             if rec is None or not bid or not ask or ask < bid:
+                continue
+            ts = q.get("ts")
+            if ts is not None and (now - as_utc(ts)).total_seconds() > max_age:
+                log.debug("alpaca: dropping stale quote %s (age %.0fs > %.0fs)",
+                          sym, (now - as_utc(ts)).total_seconds(), max_age)
                 continue
             rec.bid, rec.ask = bid, ask
             mid = (bid + ask) / 2.0

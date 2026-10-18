@@ -14,7 +14,7 @@ Source roles (docs/VERIFIED.md §G, docs/DECISIONS.md):
   fixture verification, guarded in runtime).
 - **sec** — filings + ticker->CIK map.
 - **finra** — short-sale volume and short interest.
-- **alpaca** — optional candle fallback, **BLOCKED** (key rejected).
+- **alpaca** — batched bid/ask book + optional candle fallback (free `iex` feed).
 """
 
 from __future__ import annotations

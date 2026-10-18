@@ -16,6 +16,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -140,15 +141,18 @@ def probe_alpaca() -> None:
         url = f"{base}/v2/stocks/AAPL/quotes/latest?" + urllib.parse.urlencode({"feed": feed})
         st, _, body, _ = get(url, headers=hdrs)
         save(f"alpaca_quote_{feed}", st, body, {"feed": feed})
+    # bars returns {"bars": null} unless an explicit start is sent.
     url2 = f"{base}/v2/stocks/AAPL/bars?" + urllib.parse.urlencode(
-        {"timeframe": "1Min", "limit": "5", "feed": "iex", "adjustment": "raw"})
+        {"timeframe": "1Min", "limit": "5", "feed": "iex", "adjustment": "raw",
+         "start": (datetime.now(timezone.utc) - timedelta(days=5))
+                  .strftime("%Y-%m-%dT%H:%M:%SZ")})
     st2, _, body2, _ = get(url2, headers=hdrs)
     save("alpaca_bars_iex", st2, body2)
     url3 = f"{base}/v1beta1/news?" + urllib.parse.urlencode({"symbols": "AAPL", "limit": "3"})
     st3, _, body3, _ = get(url3, headers=hdrs)
     save("alpaca_news", st3, body3)
-    # Clock endpoint: is the market open? and confirms API auth.
-    url4 = f"{base}/v2/clock"
+    # Clock lives on the trading host, not data.alpaca.markets.
+    url4 = "https://paper-api.alpaca.markets/v2/clock"
     st4, _, body4, _ = get(url4, headers=hdrs)
     save("alpaca_clock", st4, body4)
 

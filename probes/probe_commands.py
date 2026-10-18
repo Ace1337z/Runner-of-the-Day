@@ -74,6 +74,32 @@ def main() -> int:
     r = tg.handle_command("/setkey FINVIZ_TOKEN x", "999", cfg, ctx=ctx)
     assert r is None, r
 
+    # subscriber lifecycle: add -> read-only access -> welcome -> refuse admin
+    r = tg.handle_command("/addsub 222 5 Dave", CHAT, cfg, ctx=ctx)
+    assert r.endswith("Welcome playbook delivered."), r
+    assert store.is_active("222")
+    assert any(m["chat"] == "222" and "HOW TO TRADE IGNITION ALERTS" in m["text"]
+               for m in tg.messages)
+    r = tg.handle_command("/status", "222", cfg, ctx=ctx)
+    assert r is not None and "ROTD status" in r, r
+    assert tg.handle_command("/setkey AI_KEY x", "222", cfg, ctx=ctx) == "Unauthorized."
+    assert tg.handle_command("/broadcast hi", "222", cfg, ctx=ctx) == "⛔ Admin command only."
+    r = tg.handle_command("/subs", CHAT, cfg, ctx=ctx)
+    assert "222 (Dave): Active, 5 days left" in r, r
+    # owner broadcast fans out to owner + the one active subscriber
+    tg.messages.clear()
+    r = tg.handle_command("/broadcast close at 13:00", CHAT, cfg, ctx=ctx)
+    assert r == "📢 Broadcast sent! Delivered to 2 chat(s) (0 failed).", r
+    assert [m["chat"] for m in tg.messages] == [CHAT, "222"], tg.messages
+    r = tg.handle_command("/rmsub 222", CHAT, cfg, ctx=ctx)
+    assert r.startswith("🗑️"), r
+    assert not store.is_active("222")
+    # lapsed subscriber gets the dated line, not the menu
+    store.add_subscriber("333", 1)
+    store.execute("UPDATE subscribers SET expires_at='2026-01-01' WHERE chat_id='333'")
+    r = tg.handle_command("/status", "333", cfg, ctx=ctx)
+    assert r.startswith("⚠️ Your subscription expired on 2026-01-01."), r
+
     store.close()
     print("command-set checks OK; commands exercised:", len(commands))
     return 0

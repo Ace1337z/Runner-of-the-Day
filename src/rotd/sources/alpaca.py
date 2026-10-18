@@ -4,20 +4,20 @@ Alpaca's ``/v2/stocks/quotes/latest?symbols=...`` endpoint returns bid/ask for u
 to 40 symbols in one round trip, which is how the runtime gets a real spread for
 the tracked pool without a per-symbol request.
 
-**Key status** (docs/VERIFIED.md G-9): the originally supplied key pair was
-rejected with a clean ``401 unauthorized``. The adapter is built and fails soft —
-``health()`` reports ``BLOCKED`` until a working key is configured, and the
-runtime simply keeps the Finviz-only record. Do not depend on Alpaca.
+**Key status** (docs/VERIFIED.md G-9): a paper-account key pair works against
+``data.alpaca.markets`` on the free ``iex`` feed. SIP is 403 on that plan, so
+``ALPACA_FEED=iex`` stays the default. The adapter still fails soft: a rejected
+key reports ``BLOCKED`` and the runtime keeps the Finviz-only record.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from .base import BaseClient, SourceError, fnum
-from ..util import UTC
+from ..util import UTC, now_utc
 
 log = logging.getLogger(__name__)
 
@@ -55,9 +55,19 @@ class AlpacaClient(BaseClient):
             raise SourceError(f"alpaca: HTTP {resp.status_code}")
         return resp.json()
 
-    def bars(self, symbol: str, timeframe: str = "1Min", limit: int = 120) -> list[dict[str, Any]]:
-        data = self._get(f"/v2/stocks/{symbol.upper()}/bars", timeframe=timeframe,
-                         limit=limit)
+    def bars(self, symbol: str, timeframe: str = "1Min", limit: int = 120,
+             start: Optional[datetime] = None) -> list[dict[str, Any]]:
+        # Alpaca returns ``bars: null`` when neither start nor end is given, so
+        # default to a window that covers the last ``limit`` bars. The window is
+        # at least 5 days wide so a weekend/holiday gap still finds a session.
+        unit = 86400 if timeframe.endswith("Day") else 60
+        params: dict[str, Any] = {"timeframe": timeframe, "limit": limit}
+        if start is None:
+            span = max(unit * max(limit, 1), 5 * 86400)
+            start = now_utc() - timedelta(seconds=span)
+            params["sort"] = "desc"  # newest first, then re-ordered below
+        params["start"] = start.strftime("%Y-%m-%dT%H:%M:%SZ")
+        data = self._get(f"/v2/stocks/{symbol.upper()}/bars", **params)
         out = []
         for b in (data or {}).get("bars") or []:
             ts = b.get("t")
@@ -68,6 +78,7 @@ class AlpacaClient(BaseClient):
                 "low": fnum(b.get("l")), "close": fnum(b.get("c")),
                 "volume": fnum(b.get("v")),
             })
+        out.sort(key=lambda b: b["ts"] or datetime.min.replace(tzinfo=UTC))
         return out
 
     def latest_quote(self, symbol: str) -> dict[str, Any]:
@@ -103,7 +114,9 @@ class AlpacaClient(BaseClient):
         if not self.cfg.raw("ALPACA_KEY"):
             return False, "BLOCKED: no key configured"
         try:
-            self.bars("AAPL", limit=1)
+            # The quotes endpoint is the one the runtime actually uses; it
+            # validates auth and the feed entitlement in one call.
+            self.latest_quotes(["AAPL"])
             return True, "ok"
         except AlpacaBlocked:
             return False, "BLOCKED: credentials rejected (regenerate key)"
