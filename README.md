@@ -145,7 +145,8 @@ release:
 - **The database migrates itself** on first start (WAL, indexes, retention
   window, `auto_vacuum`). No manual SQL. The `subscribers` table is created by
   the same migration; existing installs start with an empty guest list, so
-  behaviour is unchanged until the owner runs `/addsub`.
+  behaviour is unchanged until the owner runs `/addsub`. `seen_users` (added with
+  the access-request flow) fills up on its own as people message the bot.
 
 ### Reclaiming a bloated database (one time)
 
@@ -480,9 +481,10 @@ enumerate.
 | `/setbudget N` | ✓ | — | Set the daily IGNITION budget (1–10). Persisted and applied immediately, no restart |
 | `/resetbudget` | ✓ | — | Clear today's spent IGNITION slots — deletes today's `IGNITION` rows and resets the in-memory budget to `0/N` |
 | `/keys` | ✓ | — | Show which API keys are set vs missing |
-| `/addsub CHAT_ID DAYS [LABEL]` | ✓ | — | Grant or renew a subscription; expiry is today + DAYS |
-| `/rmsub CHAT_ID` | ✓ | — | Revoke a subscription immediately |
-| `/subs` | ✓ | — | List subscribers with status and days left |
+| `/addsub CHAT_ID\|@username DAYS [LABEL]` | ✓ | — | Grant or renew a subscription; expiry is today + DAYS. An `@username` that never opened the bot is pre-registered and links on their `/start` |
+| `/rmsub CHAT_ID\|@username` | ✓ | — | Revoke a subscription immediately |
+| `/checksubs` | ✓ | — | List every subscriber with status and days left (`/subs` is an alias) |
+| `/request` | ✓ | ✓ | Ask the owner for access (also the 🔑 button on `/start`) |
 | `/broadcast MESSAGE` | ✓ | — | Send an announcement to the owner and every active subscriber, then report `Delivered to N chat(s) (M failed)` |
 | `/shadow-start [YYYY-MM-DD]` | ✓ | — | Start the 10-trading-day shadow clock (`--force` restarts) |
 | `/shadow` | ✓ | — | The 10-trading-day shadow clock |
@@ -523,10 +525,30 @@ From Telegram (owner only):
 
 ```
 /addsub 123456789 30 Dave      # ✅ Subscriber 123456789 (Dave) activated for 30 days (expires 2026-11-17). Welcome playbook delivered.
-/subs                          # 👥 ROTD Subscribers: … Total active: 1
-/rmsub 123456789               # 🗑️ Subscriber 123456789 removed.
+/addsub @edogen 30            # resolves via seen_users; pre-registers if they never opened the bot
+/checksubs                     # 👥 ROTD Subscribers List: … Total Active: 1 | Total Registered: 2
+/rmsub @edogen                 # 🗑️ Subscriber 123456789 removed.
 /broadcast market closes 13:00 # 📢 Broadcast sent! Delivered to 4 chat(s) (0 failed).
 ```
+
+### Access requests (self-service)
+
+Telegram will not let a bot open a DM from an `@username`; the numeric `chat_id`
+is required. Every message and button tap is therefore recorded in `seen_users`,
+which makes `@username` resolvable afterwards.
+
+A stranger who sends `/start` gets a 🔑 Request Access button (or types
+`/request`). That marks them `PENDING` and DMs the owner their name, handle and
+chat id with one-click `30 / 60 / 90 days` and `Reject` buttons. Approving adds
+the subscriber row, marks them `APPROVED`, and immediately delivers the welcome
+playbook. A second tap is ignored (`already pending`); a rejected chat gets no
+further response.
+
+If the owner runs `/addsub @someone 30` before that user ever messaged the bot,
+a placeholder `@someone` row is stored; the user's first `/start` migrates it to
+their numeric id and delivers the playbook automatically.
+
+`/checksubs` shows every row (active and expired) with exact days left.
 
 `/addsub` immediately pushes the welcome playbook (how to trade an IGNITION:
 pullback vs HOD breakout, VWAP stop, scaling out, ABORT handling) to the new

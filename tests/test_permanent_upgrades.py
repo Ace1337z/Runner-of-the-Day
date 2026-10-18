@@ -403,8 +403,8 @@ def test_addsub_rmsub_and_subs_replies(tmp_path: Path):
     assert tg.handle_command("/addsub 222 0", "111", cfg, ctx) == \
         "subscriber: days must be >= 1"
     listing = tg.handle_command("/subs", "111", cfg, ctx)
-    assert "222 (Dave): Active, 30 days left" in listing
-    assert listing.endswith("Total active: 1")
+    assert "222 (Dave) — ACTIVE (30 days left, exp" in listing
+    assert listing.endswith("Total Active: 1 | Total Registered: 1")
     assert tg.handle_command("/rmsub 222", "111", cfg, ctx) == "🗑️ Subscriber 222 removed."
     assert tg.handle_command("/rmsub 222", "111", cfg, ctx) == "no subscriber with chat id 222"
     store.close()

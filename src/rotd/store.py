@@ -189,6 +189,18 @@ CREATE TABLE IF NOT EXISTS subscribers (
     label         TEXT DEFAULT '',
     created_at    TEXT NOT NULL
 );
+
+-- Every chat that ever messaged the bot. Telegram will not let the bot open a
+-- chat by @username, so the numeric id is captured here first and /request
+-- turns a row into a PENDING access request.
+CREATE TABLE IF NOT EXISTS seen_users (
+    chat_id     TEXT PRIMARY KEY,
+    username    TEXT DEFAULT '',          -- lowercase, no '@'
+    first_name  TEXT DEFAULT '',
+    status      TEXT DEFAULT 'SEEN',      -- SEEN, PENDING, APPROVED, REJECTED
+    updated_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_seen_username ON seen_users(username);
 """
 
 
@@ -480,6 +492,155 @@ class Store:
 
     def all_subscribers(self) -> list[sqlite3.Row]:
         return self.query("SELECT * FROM subscribers ORDER BY expires_at DESC")
+
+    def get_all_subscribers(self) -> list[dict[str, Any]]:
+        """Every subscriber row with ``days_left`` and ``is_active`` computed.
+
+        ``days_left`` is a plain calendar difference (today -> expiry); a lapsed
+        row is negative, not clamped, so the caller can say "expired 3 days ago".
+        """
+        today = now_utc().date()
+        out: list[dict[str, Any]] = []
+        for r in self.all_subscribers():
+            exp = str(r["expires_at"])
+            try:
+                days_left = (date.fromisoformat(exp) - today).days
+            except ValueError:
+                days_left = -1
+            out.append({"chat_id": str(r["chat_id"]), "expires_at": exp,
+                        "label": str(r["label"] or ""), "days_left": days_left,
+                        "is_active": days_left >= 0})
+        return out
+
+    # -- seen users / access requests ---------------------------------------
+    def record_seen_user(self, chat_id: str, username: str = "",
+                         first_name: str = "") -> None:
+        """Upsert a chat that messaged or tapped a button (id + @username).
+
+        An empty ``username``/``first_name`` on a later update never erases a
+        value already known: users who hide their username would otherwise
+        wipe the only handle the owner has.
+        """
+        cid = str(chat_id).strip()
+        if not cid:
+            return
+        user = str(username or "").strip().lstrip("@").lower()
+        name = str(first_name or "").strip()
+        self.execute(
+            """INSERT INTO seen_users(chat_id, username, first_name, status, updated_at)
+               VALUES (?,?,?,'SEEN',?)
+               ON CONFLICT(chat_id) DO UPDATE SET
+                   username=CASE WHEN excluded.username != '' THEN excluded.username
+                                 ELSE seen_users.username END,
+                   first_name=CASE WHEN excluded.first_name != '' THEN excluded.first_name
+                                   ELSE seen_users.first_name END,
+                   updated_at=excluded.updated_at""",
+            (cid, user, name, _iso(now_utc())))
+
+    def get_seen_user(self, chat_id: str) -> Optional[dict[str, Any]]:
+        row = self.query_one("SELECT * FROM seen_users WHERE chat_id=?",
+                             (str(chat_id).strip(),))
+        return dict(row) if row else None
+
+    def set_request_status(self, chat_id: str, status: str) -> None:
+        """Set SEEN/PENDING/APPROVED/REJECTED for a chat (inserted if unknown)."""
+        cid = str(chat_id).strip()
+        if not cid:
+            return
+        self.execute(
+            """INSERT INTO seen_users(chat_id, username, first_name, status, updated_at)
+               VALUES (?, '', '', ?, ?)
+               ON CONFLICT(chat_id) DO UPDATE SET status=excluded.status,
+                                                 updated_at=excluded.updated_at""",
+            (cid, str(status).upper(), _iso(now_utc())))
+
+    def get_request_status(self, chat_id: str) -> str:
+        row = self.query_one("SELECT status FROM seen_users WHERE chat_id=?",
+                             (str(chat_id).strip(),))
+        return str(row["status"]) if row else "SEEN"
+
+    def resolve_target_to_chat_id(self, target: str) -> Optional[tuple[str, str]]:
+        """Resolve a numeric id or ``@username`` to ``(chat_id, label)``.
+
+        Numeric targets resolve to themselves (label = known @username, if any)
+        so the owner can always add an id even before the user says anything.
+        A username must have messaged the bot at least once: Telegram cannot
+        open a chat from a handle alone, so an unknown handle returns ``None``
+        and the caller stores a pending ``@handle`` row instead.
+        """
+        t = str(target or "").strip()
+        if not t:
+            return None
+        numeric = t[1:] if t.startswith("-") else t
+        if numeric.isdigit():
+            seen = self.get_seen_user(t)
+            if seen and seen.get("username"):
+                return t, f"@{seen['username']}"
+            return t, (seen.get("first_name") or "") if seen else ""
+        handle = t.lstrip("@").lower()
+        if not handle:
+            return None
+        seen = self.query_one(
+            "SELECT chat_id, username FROM seen_users "
+            "WHERE LOWER(username)=? ORDER BY updated_at DESC LIMIT 1", (handle,))
+        if seen:
+            return str(seen["chat_id"]), f"@{seen['username'] or handle}"
+        row = self.query_one(
+            "SELECT chat_id FROM subscribers WHERE LOWER(label)=? "
+            "OR LOWER(chat_id)=? LIMIT 1",
+            (f"@{handle}", f"@{handle}"))
+        if row:
+            return str(row["chat_id"]), f"@{handle}"
+        return None
+
+    def find_pending_username(self, username: str) -> Optional[str]:
+        """The placeholder ``@handle`` subscriber row for a username, if any."""
+        handle = str(username or "").strip().lstrip("@").lower()
+        if not handle:
+            return None
+        row = self.query_one(
+            "SELECT chat_id FROM subscribers WHERE LOWER(chat_id)=? LIMIT 1",
+            (f"@{handle}",))
+        return str(row["chat_id"]) if row else None
+
+    def link_pending_username(self, username: str, chat_id: str) -> Optional[date]:
+        """Migrate a pending ``@handle`` row to a numeric chat id (on /start).
+
+        Returns the expiry date when a row was moved, else ``None``.
+        """
+        pending = self.find_pending_username(username)
+        if not pending:
+            return None
+        expires = self.subscriber_expiry(pending)
+        if not expires:
+            return None
+        try:
+            exp = date.fromisoformat(expires)
+        except ValueError:
+            return None
+        handle = f"@{str(username).strip().lstrip('@').lower()}"
+        # A numeric row may already exist (owner added the id directly). Never
+        # shorten it: keep whichever expiry is later.
+        existing = self.subscriber_expiry(chat_id)
+        if existing:
+            try:
+                exp = max(exp, date.fromisoformat(existing))
+            except ValueError:
+                pass
+            expires = exp.isoformat()
+        self.execute("DELETE FROM subscribers WHERE chat_id=?", (pending,))
+        # Direct insert keeps the exact expiry the owner granted.
+        self.execute(
+            """INSERT INTO subscribers(chat_id, expires_at, label, created_at)
+               VALUES (?,?,?,?)
+               ON CONFLICT(chat_id) DO UPDATE SET expires_at=excluded.expires_at,
+                                                 label=excluded.label""",
+            (str(chat_id).strip(), expires, handle, _iso(now_utc())))
+        return exp
+
+    def is_active_subscriber(self, chat_id: str) -> bool:
+        """Alias of :meth:`is_active`, used by the request/approval flow."""
+        return self.is_active(chat_id)
 
     # -- retained maintenance ----------------------------------------------
     def prune(self, raw_retention_days: int, today: Optional[date] = None) -> dict[str, int]:

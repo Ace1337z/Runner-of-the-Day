@@ -16,6 +16,9 @@ from typing import Any, Iterable, Optional
 
 from .util import scrub, fmt_ts, now_utc
 from .calendar_us import session_info
+from .notifier import (WELCOME_PROMPT, render_access_request,
+                       render_subscriber_welcome, render_subscribers_list,
+                       request_markup)
 
 log = logging.getLogger(__name__)
 
@@ -221,13 +224,15 @@ SETTABLE_KEYS = (
 COMMANDS = (
     ("/start", "wake the bot and show the command menu"),
     ("/help", "list every command"),
+    ("/request", "request access from the administrator"),
     ("/setkey KEY VALUE", "set an API key after install (secrets saved, not echoed)"),
     ("/setbudget N", "set the daily IGNITION alert budget (1..10, applied immediately)"),
     ("/resetbudget", "clear today's spent IGNITION slots (budget back to 0/N)"),
     ("/keys", "show which API keys are set and which are missing"),
     ("/addsub CHAT_ID DAYS [LABEL]", "grant a read-only subscription (renews if known)"),
     ("/rmsub CHAT_ID", "revoke a subscription immediately"),
-    ("/subs", "list subscribers with status and days left"),
+    ("/checksubs", "list every subscriber with status and days left"),
+    ("/subs", "alias of /checksubs"),
     ("/broadcast MESSAGE", "send an announcement to the owner and all subscribers"),
     ("/shadow-start [YYYY-MM-DD]", "start the 10-trading-day shadow clock"),
     ("/setup", "how to re-run the installer (host shell only)"),
@@ -244,8 +249,12 @@ COMMANDS = (
 # Two-tier access. Anything not listed here is admin-only, so a new command is
 # locked to the owner by default (fail closed).
 READONLY_COMMANDS = frozenset({"status", "board", "runners", "miss", "alerts"})
-PUBLIC_COMMANDS = frozenset({"start", "help"})
+PUBLIC_COMMANDS = frozenset({"start", "help", "request"})
 EXPIRED_REPLY = "⚠️ Your subscription expired on {date}. Contact admin to renew."
+
+REQUEST_SENT_REPLY = ("✅ Your access request has been sent to the administrator! "
+                      "You will receive your welcome guide here as soon as it is approved.")
+REQUEST_PENDING_REPLY = "⏳ Your access request is already pending admin approval."
 
 
 def _usage(role: str = "admin") -> str:
@@ -382,7 +391,10 @@ def handle_command(self, text: str, sender_chat: str, cfg: "Config",
     name = parts[0].lower().split("@")[0]
     role, expired_on = _sender_role(self, sender_chat, cfg, ctx)
     if role == "unknown":
-        return None
+        # A stranger may only ask for access or say hello; everything else stays
+        # silent so the bot cannot be enumerated.
+        if name not in PUBLIC_COMMANDS:
+            return None
     if name == "broadcast":
         # Handled before the generic gate so a subscriber gets the explicit
         # refusal the brief asks for; everyone else is ignored silently.
@@ -408,12 +420,25 @@ def handle_command(self, text: str, sender_chat: str, cfg: "Config",
             self.set_commands(menu_commands())
         except Exception:  # noqa: BLE001 - menu is cosmetic; never block the reply
             pass
+        # A pre-registered @username just pressed /start: bind the placeholder row
+        # to the real chat id. For a stranger that is also their activation; for a
+        # subscriber it just clears the duplicate pending row.
+        store = (ctx or {}).get("store")
+        linked = None
+        if name == "start" and store is not None:
+            seen = store.get_seen_user(sender_chat) or {}
+            linked = store.link_pending_username(seen.get("username", ""), sender_chat)
+            if linked is not None and role == "unknown":
+                store.set_request_status(sender_chat, "APPROVED")
+                if linked < now_utc().date():
+                    return EXPIRED_REPLY.format(date=linked.isoformat())
+                days = max(0, (linked - now_utc().date()).days)
+                return render_subscriber_welcome(days, linked.isoformat())
         if role == "bootstrap":
             return ("ROTD — Runner of the Day.\n"
                     f"Your chat id is {sender_chat}. Add it as TELEGRAM_CHAT_ID "
                     "(or run `rotd setup`) to finish setup.")
         if role == "subscriber":
-            from .notifier import render_subscriber_welcome
             from datetime import date as _d
             sub = ((ctx or {}).get("store") or None)
             row = sub.get_subscriber(sender_chat) if sub is not None else None
@@ -426,9 +451,41 @@ def handle_command(self, text: str, sender_chat: str, cfg: "Config",
             except ValueError:
                 days_left = 0
             return render_subscriber_welcome(days_left, expires)
+        if role == "unknown":
+            # Unregistered visitor (also /help): offer the Request Access button
+            # and never the admin command list.
+            return WELCOME_PROMPT
         return ("ROTD — Runner of the Day. Watching the sub-$10 universe.\n"
                 + _usage()
                 + "\n\nSet a key any time, e.g. /setkey FINVIZ_TOKEN <token>")
+
+    if name == "request":
+        store = (ctx or {}).get("store")
+        if store is None:
+            return "requests need the database; start the listener first."
+        if role == "owner":
+            return "You are the owner; no access request needed."
+        if role == "subscriber":
+            return "✅ You already have access. Type /help for the playbook."
+        owner = str(cfg.raw("TELEGRAM_CHAT_ID") or self.chat_id or "").strip()
+        if not owner:
+            return "No administrator is configured yet; run `rotd setup` first."
+        status = store.get_request_status(sender_chat)
+        if status == "PENDING":
+            return REQUEST_PENDING_REPLY
+        if status == "REJECTED":
+            return None  # fail closed: a rejected chat gets no further response
+        seen = store.get_seen_user(sender_chat) or {}
+        store.set_request_status(sender_chat, "PENDING")
+        # Notify the owner directly. This is a user-initiated admin action, so it
+        # is sent even in SHADOW (same rule as /broadcast: commands act).
+        text = render_access_request(sender_chat, seen.get("username", ""),
+                                     seen.get("first_name", ""))
+        try:
+            self.send(text, chat_id=owner, markup=request_markup(sender_chat))
+        except Exception as exc:  # noqa: BLE001 - the user still gets a reply
+            log.warning("request: owner notify failed: %s", exc)
+        return REQUEST_SENT_REPLY
 
     if name == "setkey":
         if len(parts) < 3:
@@ -450,7 +507,7 @@ def handle_command(self, text: str, sender_chat: str, cfg: "Config",
 
     if name == "addsub":
         if len(parts) < 3:
-            return "usage: /addsub CHAT_ID DAYS [LABEL]"
+            return "usage: /addsub CHAT_ID|@username DAYS [LABEL]"
         store = (ctx or {}).get("store")
         if store is None:
             return "subscribers need the database; start the listener first."
@@ -458,65 +515,69 @@ def handle_command(self, text: str, sender_chat: str, cfg: "Config",
             days = int(parts[2])
         except ValueError:
             return f"invalid days: {parts[2]!r}"
+        target = parts[1]
         label = " ".join(parts[3:]).strip()
+        resolved = store.resolve_target_to_chat_id(target)
+        if resolved is not None and not resolved[0].startswith("@"):
+            chat_id, auto_label = resolved
+        else:
+            # An @username who has never opened the bot (or an existing pending
+            # row): Telegram will not let us message them, so park/refresh a
+            # placeholder row and link it on their /start.
+            handle = target.lstrip("@").lower()
+            if not handle:
+                return f"cannot resolve {target!r}"
+            placeholder = f"@{handle}"
+            try:
+                expires = store.add_subscriber(placeholder, days, label or placeholder)
+            except ValueError as exc:
+                return str(exc)
+            return (f"⏳ Pre-registered {target} for {days} days "
+                    f"(expires {expires.isoformat()}). As soon as they open the bot "
+                    "and press /start, their numeric ID will link automatically and "
+                    "the welcome playbook will be delivered.")
+        final_label = label or auto_label
         try:
-            expires = store.add_subscriber(parts[1], days, label)
+            expires = store.add_subscriber(chat_id, days, final_label)
         except ValueError as exc:
             return str(exc)
-        head = (f"✅ Subscriber {parts[1]} ({label or 'no label'}) activated for "
+        store.set_request_status(chat_id, "APPROVED")
+        head = (f"✅ Subscriber {chat_id} ({final_label or 'no label'}) activated for "
                 f"{days} days (expires {expires.isoformat()}).")
         # Push the playbook immediately so the new subscriber knows the rules
         # before the first IGNITION lands. A chat that has never messaged the bot
         # cannot be opened by the bot; that is a "retry on /start" case, not a
         # failure of the subscription itself.
-        from .notifier import Notifier, render_subscriber_welcome
+        from .notifier import Notifier
         notifier = (ctx or {}).get("notifier")
         if notifier is None:
             notifier = Notifier(cfg, self, store)
         try:
-            notifier._send_raw(parts[1], render_subscriber_welcome(days, expires.isoformat()))
+            notifier._send_raw(chat_id, render_subscriber_welcome(days, expires.isoformat()))
         except Exception as exc:  # noqa: BLE001 - subscription already saved
-            log.warning("addsub: welcome to %s failed: %s", parts[1], exc)
+            log.warning("addsub: welcome to %s failed: %s", chat_id, exc)
             return (head + " Note: Welcome playbook will be delivered once the "
                     "user sends /start to the bot.")
         return head + " Welcome playbook delivered."
 
     if name == "rmsub":
         if len(parts) < 2:
-            return "usage: /rmsub CHAT_ID"
+            return "usage: /rmsub CHAT_ID|@username"
         store = (ctx or {}).get("store")
         if store is None:
             return "subscribers need the database; start the listener first."
-        if not store.remove_subscriber(parts[1]):
-            return f"no subscriber with chat id {parts[1]}"
-        return f"🗑️ Subscriber {parts[1]} removed."
+        target = parts[1]
+        resolved = store.resolve_target_to_chat_id(target)
+        chat_id = resolved[0] if resolved else target
+        if not store.remove_subscriber(chat_id):
+            return f"no subscriber with chat id {chat_id}"
+        return f"🗑️ Subscriber {chat_id} removed."
 
-    if name == "subs":
+    if name in ("subs", "checksubs"):
         store = (ctx or {}).get("store")
         if store is None:
             return "subscribers need the database; start the listener first."
-        from datetime import date as _d
-        today = now_utc().date()
-        rows = store.all_subscribers()
-        lines = ["👥 ROTD Subscribers:"]
-        active = 0
-        for r in rows:
-            exp = str(r["expires_at"])
-            try:
-                left = (_d.fromisoformat(exp) - today).days
-            except ValueError:
-                left = -1
-            label = f" ({r['label']})" if r["label"] else ""
-            if left >= 0:
-                active += 1
-                lines.append(f"- {r['chat_id']}{label}: Active, {left} days left "
-                             f"(exp {exp})")
-            else:
-                lines.append(f"- {r['chat_id']}{label}: EXPIRED (exp {exp})")
-        if not rows:
-            lines.append("- none")
-        lines.append(f"Total active: {active}")
-        return "\n".join(lines)
+        return render_subscribers_list(store.get_all_subscribers())
 
     if name == "setbudget":
         if len(parts) < 2:
@@ -733,6 +794,7 @@ class FakeTelegram:
         self.actions: list[str] = []
         self.menu: list[tuple[str, str]] = []
         self._next_id = 1000
+        self._by_id: dict[int, dict] = {}
 
     def send(self, text: str, chat_id: Optional[str] = None, disable_preview: bool = True,
              markup: Optional[dict] = None, *, silent: bool = False) -> int:
@@ -741,11 +803,20 @@ class FakeTelegram:
                "chat": str(chat_id or self.chat_id or "")}
         self.messages.append(msg)
         self.sent.append(msg)
+        self._by_id[msg["id"]] = msg
         return self._next_id
 
     def edit(self, msg_id: int, text: str, chat_id: Optional[str] = None,
              markup: Optional[dict] = None) -> bool:
         self.edits.append({"id": msg_id, "text": text, "markup": markup})
+        target = self._by_id.get(msg_id)
+        if target is None:
+            # Buttons edit a message the bot sent before this process started,
+            # so it is not in ``messages``; keep it addressable for text_of().
+            target = {"id": msg_id, "text": text, "markup": markup, "chat": str(chat_id or "")}
+            self._by_id[msg_id] = target
+        target["text"] = text
+        target["markup"] = markup
         for m in self.messages:
             if m["id"] == msg_id:
                 m["text"] = text
@@ -797,6 +868,8 @@ class FakeTelegram:
         return str(self.cfg.raw("TELEGRAM_CHAT_ID") if self.cfg else "") or None
 
     def text_of(self, msg_id: int) -> str:
+        if msg_id in self._by_id:
+            return self._by_id[msg_id]["text"]
         for m in self.messages:
             if m["id"] == msg_id:
                 return m["text"]

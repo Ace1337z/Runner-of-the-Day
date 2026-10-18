@@ -188,6 +188,61 @@ def render_subscriber_welcome(days: int, expires_at: str) -> str:
     )
 
 
+WELCOME_PROMPT = (
+    "👋 Welcome to ROTD (Runner of the Day)!\n\n"
+    "This is a private momentum scanner. Tap the button below (or type /request) "
+    "to request access from the administrator."
+)
+REQUEST_ACCESS_MARKUP = {
+    "inline_keyboard": [[{"text": "🔑 Request Access", "callback_data": "req_access"}]]
+}
+
+
+def request_markup(chat_id: str) -> dict[str, Any]:
+    """Owner's 1-click approval keyboard for one access request."""
+    cid = str(chat_id)
+    return {"inline_keyboard": [
+        [{"text": "✅ 30 Days", "callback_data": f"sub_app:{cid}:30"},
+         {"text": "✅ 60 Days", "callback_data": f"sub_app:{cid}:60"},
+         {"text": "✅ 90 Days", "callback_data": f"sub_app:{cid}:90"}],
+        [{"text": "❌ Reject", "callback_data": f"sub_rej:{cid}"}],
+    ]}
+
+
+def render_access_request(chat_id: str, username: str = "", first_name: str = "") -> str:
+    """The admin notification for a pending request (buttons are separate)."""
+    handle = f"@{username}" if username else "none"
+    name = first_name or "Unknown"
+    return (
+        "🔔 New ROTD Access Request\n"
+        f"• Name: {name}\n"
+        f"• Username: {handle}\n"
+        f"• Chat ID: {chat_id}\n\n"
+        "Tap a button below for 1-click approval, or add manually with custom days:\n"
+        f"/addsub {chat_id} <days> @{username or first_name}"
+    )
+
+
+def render_subscribers_list(rows: list[dict[str, Any]]) -> str:
+    """``/checksubs`` body: every subscriber with status and days left."""
+    if not rows:
+        return "📭 No subscribers registered yet."
+    lines = ["👥 ROTD Subscribers List:"]
+    active = 0
+    for r in rows:
+        label = f" ({r['label']})" if r.get("label") and r["label"] != r["chat_id"] else ""
+        if r.get("is_active"):
+            active += 1
+            left = int(r.get("days_left", 0))
+            lines.append(f"• {r['chat_id']}{label} — ACTIVE ({left} day"
+                         f"{'' if left == 1 else 's'} left, exp {r['expires_at']})")
+        else:
+            lines.append(f"• {r['chat_id']}{label} — EXPIRED (exp {r['expires_at']})")
+    lines.append("")
+    lines.append(f"Total Active: {active} | Total Registered: {len(rows)}")
+    return "\n".join(lines)
+
+
 class Notifier:
     """Sends messages through a client, honouring shadow mode.
 
@@ -213,7 +268,9 @@ class Notifier:
         if self.store is not None:
             try:
                 for chat in self.store.get_active_subscribers():
-                    if chat and chat not in out:
+                    # A pre-registered "@handle" row has no numeric id yet; the
+                    # Bot API cannot address it, so skip until /start links it.
+                    if chat and chat not in out and not chat.startswith("@"):
                         out.append(chat)
             except Exception as exc:  # noqa: BLE001 - a bad row must not stop a push
                 log.warning("subscriber lookup failed: %s", exc)

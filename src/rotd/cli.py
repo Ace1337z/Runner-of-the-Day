@@ -276,6 +276,113 @@ def cmd_finalize(cfg: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def _handle_callback(cfg, store, tg, cb: dict) -> None:
+    """Handle an inline-button tap: access request, approve, reject.
+
+    Owner-only for ``sub_app``/``sub_rej`` (the callback's sender is re-checked
+    against ``TELEGRAM_CHAT_ID``, never trusted from the button data). Every path
+    answers the callback query so Telegram stops the button spinner.
+    """
+    from .telegram import REQUEST_PENDING_REPLY, REQUEST_SENT_REPLY
+    cb_id = str(cb.get("id") or "")
+    data = str(cb.get("data") or "")
+    sender = str(((cb.get("from") or {}).get("id")) or "")
+    owner = str(cfg.raw("TELEGRAM_CHAT_ID") or "").strip()
+    if not sender:
+        tg.answer_callback(cb_id, "")
+        return
+    try:
+        store.record_seen_user(sender, (cb.get("from") or {}).get("username", ""),
+                               (cb.get("from") or {}).get("first_name", ""))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("callback: record_seen_user failed: %s", exc)
+
+    def _edit(text: str) -> None:
+        msg = cb.get("message") or {}
+        if msg.get("message_id"):
+            try:
+                tg.edit(int(msg["message_id"]), text, chat_id=sender or owner or None)
+            except Exception as exc:  # noqa: BLE001 - fall back to a plain reply
+                log.warning("callback: edit failed: %s", exc)
+
+    if data == "req_access":
+        # Same path as /request so the button and the typed command cannot drift.
+        if sender == owner:
+            tg.answer_callback(cb_id, "Owner")
+            return
+        if store.is_active_subscriber(sender):
+            tg.answer_callback(cb_id, "Already active")
+            _edit("✅ You already have access. Type /help for the playbook.")
+            return
+        status = store.get_request_status(sender)
+        if status == "PENDING":
+            tg.answer_callback(cb_id, "Already pending")
+            _edit(REQUEST_PENDING_REPLY)
+            return
+        if status == "REJECTED":
+            tg.answer_callback(cb_id, "")
+            return
+        seen = store.get_seen_user(sender) or {}
+        store.set_request_status(sender, "PENDING")
+        if owner:
+            from .notifier import render_access_request, request_markup
+            try:
+                tg.send(render_access_request(sender, seen.get("username", ""),
+                                              seen.get("first_name", "")),
+                        chat_id=owner, markup=request_markup(sender))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("callback: owner notify failed: %s", exc)
+        tg.answer_callback(cb_id, "Request sent")
+        _edit(REQUEST_SENT_REPLY)
+        return
+
+    if not (data.startswith("sub_app:") or data.startswith("sub_rej:")):
+        tg.answer_callback(cb_id, "")
+        return
+    if not owner or sender != owner:
+        tg.answer_callback(cb_id, "Not authorized", show_alert=True)
+        return
+
+    from .notifier import render_subscriber_welcome
+
+    if data.startswith("sub_app:"):
+        try:
+            _, target, days_s = data.split(":", 2)
+            days = int(days_s)
+        except ValueError:
+            tg.answer_callback(cb_id, "Bad button")
+            return
+        seen = store.get_seen_user(target) or {}
+        label = (f"@{seen['username']}" if seen.get("username")
+                 else (seen.get("first_name") or ""))
+        try:
+            expires = store.add_subscriber(target, days, label)
+        except ValueError as exc:
+            tg.answer_callback(cb_id, str(exc)[:200])
+            return
+        store.set_request_status(target, "APPROVED")
+        delivered = True
+        try:
+            tg.send(render_subscriber_welcome(days, expires.isoformat()), chat_id=target)
+        except Exception as exc:  # noqa: BLE001 - subscription is already saved
+            delivered = False
+            log.warning("callback: welcome to %s failed: %s", target, exc)
+        tg.answer_callback(cb_id, "Approved!")
+        _edit(f"✅ Approved {target} ({label or 'no label'}) for {days} days "
+              f"(expires {expires.isoformat()}). Welcome playbook "
+              f"{'delivered!' if delivered else 'will be delivered on their next /start.'}")
+        return
+
+    target = data[len("sub_rej:"):]
+    store.set_request_status(target, "REJECTED")
+    tg.answer_callback(cb_id, "Rejected")
+    _edit(f"❌ Rejected access request from {target}.")
+    try:
+        tg.send("❌ Your access request to ROTD was declined.", chat_id=target)
+    except Exception as exc:  # noqa: BLE001 - they may have blocked the bot
+        log.warning("callback: reject notice to %s failed: %s", target, exc)
+
+
 def cmd_listen(cfg: Config, args: argparse.Namespace) -> int:
     """Persistent daemon: run decision cycles AND reply to Telegram commands.
 
@@ -477,23 +584,37 @@ def store_day_closed(store: "Store", day: "date") -> bool:
 
 
 def _listen_reply(cfg, store, tg, offset, wait_s, rt=None) -> int:
-    """Drain queued Telegram commands (short poll) and reply. Returns new offset.
+    """Drain queued Telegram updates (short poll) and reply. Returns new offset.
 
     Every message is passed to :func:`handle_command`, which resolves the sender
-    to owner / subscriber / expired / unknown. Unknown senders get ``None`` and
-    therefore no reply and no typing indicator (fail closed, no enumeration).
+    to owner / subscriber / expired / unknown. Unknown senders may only /start,
+    /help and /request (no enumeration, no data). Callback queries are the
+    owner's 1-click approve/reject buttons.
     """
     ctx = {"store": store, "cfg": cfg, "runtime": rt,
            "notifier": getattr(rt, "notifier", None)}
     if cfg.raw("TELEGRAM_TOKEN") and not isinstance(tg, FakeTelegram):
-        updates = tg.get_updates(offset=offset, timeout=wait_s)
+        updates = tg.get_updates(offset=offset, timeout=wait_s,
+                                 allowed_updates=["message", "callback_query"])
     else:
         updates = tg.get_updates(offset=offset, timeout=0)  # tests / FakeTelegram
     for upd in updates:
         offset = max(offset, int(upd.get("update_id", 0)) + 1)
+        cb = upd.get("callback_query")
+        if cb:
+            _handle_callback(cfg, store, tg, cb)
+            continue
         msg = upd.get("message") or upd.get("edited_message") or {}
         text = (msg.get("text") or "").strip()
         sender = str((msg.get("chat") or {}).get("id") or "")
+        # Capture the numeric id + handle before any access check: this table is
+        # what makes @username -> chat_id resolution possible later.
+        user = msg.get("from") or {}
+        try:
+            store.record_seen_user(sender, user.get("username", ""),
+                                   user.get("first_name", ""))
+        except Exception as exc:  # noqa: BLE001 - bookkeeping never blocks a reply
+            log.warning("listen: record_seen_user failed: %s", exc)
         if not text:
             continue
         try:
@@ -517,8 +638,14 @@ def _listen_reply(cfg, store, tg, offset, wait_s, rt=None) -> int:
                 tg.send_chat_action("typing", chat_id=sender if sender else None)
             except Exception:  # noqa: BLE001
                 pass
+            # A stranger's /start (or /help) carries the Request Access button;
+            # /request already DMs the owner, so it needs no markup. Keyed off the
+            # reply text so the button can never appear on a command that has no
+            # handler for the tap.
+            from .notifier import REQUEST_ACCESS_MARKUP, WELCOME_PROMPT
+            markup = REQUEST_ACCESS_MARKUP if reply == WELCOME_PROMPT else None
             try:
-                tg.send(reply, chat_id=sender if sender else None)
+                tg.send(reply, chat_id=sender if sender else None, markup=markup)
             except Exception as exc:  # noqa: BLE001
                 log.error("listen: reply failed: %s", exc)
     return offset
@@ -781,50 +908,52 @@ def cmd_telegram_menu(cfg: Config, args: argparse.Namespace) -> int:
 def cmd_subs(cfg: Config, args: argparse.Namespace) -> int:
     """Manage read-only Telegram subscribers without going through the bot.
 
-    ``rotd subs list`` | ``rotd subs add CHAT_ID DAYS [LABEL]`` | ``rotd subs rm CHAT_ID``
+    ``rotd subs list`` | ``rotd subs add CHAT_ID|@username DAYS [LABEL]`` |
+    ``rotd subs rm CHAT_ID|@username``. Same table and rules as the bot commands.
     """
     store = Store(cfg.db_path)
     try:
         if args.action == "add":
             if not args.chat_id or args.days is None:
-                print("usage: rotd subs add CHAT_ID DAYS [LABEL]")
+                print("usage: rotd subs add CHAT_ID|@username DAYS [LABEL]")
                 return 2
+            target = str(args.chat_id).strip()
+            resolved = store.resolve_target_to_chat_id(target)
+            if resolved is None or resolved[0].startswith("@"):
+                handle = target.lstrip("@").lower()
+                if not handle:
+                    print(f"cannot resolve {target!r}")
+                    return 2
+                expires = store.add_subscriber(f"@{handle}", args.days,
+                                               args.label or f"@{handle}")
+                print(f"⏳ Pre-registered @{handle} for {args.days} days "
+                      f"(expires {expires.isoformat()}); links on their /start.")
+                return 0
+            chat_id, auto_label = resolved
+            label = args.label or auto_label
             try:
-                expires = store.add_subscriber(args.chat_id, args.days, args.label or "")
+                expires = store.add_subscriber(chat_id, args.days, label)
             except ValueError as exc:
                 print(str(exc))
                 return 2
-            print(f"✅ Subscriber {args.chat_id} added/renewed for {args.days} days "
+            store.set_request_status(chat_id, "APPROVED")
+            print(f"✅ Subscriber {chat_id} added/renewed for {args.days} days "
                   f"(expires {expires.isoformat()}).")
             return 0
         if args.action == "rm":
             if not args.chat_id:
-                print("usage: rotd subs rm CHAT_ID")
+                print("usage: rotd subs rm CHAT_ID|@username")
                 return 2
-            if not store.remove_subscriber(args.chat_id):
-                print(f"no subscriber with chat id {args.chat_id}")
+            target = str(args.chat_id).strip()
+            resolved = store.resolve_target_to_chat_id(target)
+            chat_id = resolved[0] if resolved else target
+            if not store.remove_subscriber(chat_id):
+                print(f"no subscriber with chat id {chat_id}")
                 return 1
-            print(f"🗑️ Subscriber {args.chat_id} removed.")
+            print(f"🗑️ Subscriber {chat_id} removed.")
             return 0
-        today = now_utc().date()
-        rows = store.all_subscribers()
-        print("👥 ROTD Subscribers:")
-        active = 0
-        for r in rows:
-            exp = str(r["expires_at"])
-            try:
-                left = (date.fromisoformat(exp) - today).days
-            except ValueError:
-                left = -1
-            label = f" ({r['label']})" if r["label"] else ""
-            if left >= 0:
-                active += 1
-                print(f"- {r['chat_id']}{label}: Active, {left} days left (exp {exp})")
-            else:
-                print(f"- {r['chat_id']}{label}: EXPIRED (exp {exp})")
-        if not rows:
-            print("- none")
-        print(f"Total active: {active}")
+        from .notifier import render_subscribers_list
+        print(render_subscribers_list(store.get_all_subscribers()))
         return 0
     finally:
         store.close()
