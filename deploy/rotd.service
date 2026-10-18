@@ -1,6 +1,6 @@
 [Unit]
 Description=ROTD — Runner of the Day
-Documentation=https://github.com/Ace1337z/big-whale-penny-tracker
+Documentation=https://github.com/Ace1337z/Runner-of-the-Day
 After=network-online.target
 Wants=network-online.target
 # Start-limit settings live in [Unit] (modern systemd rejects them in [Service]):

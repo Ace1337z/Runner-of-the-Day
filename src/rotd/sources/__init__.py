@@ -7,7 +7,6 @@ configuration through :class:`rotd.config.Config`.
 Source roles (docs/VERIFIED.md §G, docs/DECISIONS.md):
 - **finviz** — primary: universe, movers, quote rows, news, filings, and the only
   extended-hours price source on these plans.
-- **twelvedata** — regular-session 1-min bars + freshness quote.
 - **finnhub** — quote, news and the session detector (no candles: 403).
 - **alpha_vantage** — free ``GLOBAL_QUOTE`` only.
 - **yahoo** — last-resort chart/bars/regime.
@@ -30,20 +29,18 @@ from .finra import FinraClient
 from .finviz import FinvizClient, FinvizTokenRejected
 from .sec import SecClient
 from .tradingview import TradingViewClient
-from .twelvedata import TwelveDataClient
 from .yahoo import YahooClient
 
 __all__ = [
     "BaseClient", "SourceError", "fnum", "parse_csv",
     "AlphaVantageClient", "AlpacaClient", "AlpacaBlocked",
     "FinnhubClient", "FinraClient", "FinvizClient", "FinvizTokenRejected",
-    "SecClient", "TwelveDataClient", "TradingViewClient", "YahooClient",
+    "SecClient", "TradingViewClient", "YahooClient",
     "build_clients", "SOURCE_CLASSES",
 ]
 
 SOURCE_CLASSES = {
     "finviz": FinvizClient,
-    "twelvedata": TwelveDataClient,
     "finnhub": FinnhubClient,
     "alpha_vantage": AlphaVantageClient,
     "yahoo": YahooClient,

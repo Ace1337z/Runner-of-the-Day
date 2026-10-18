@@ -1,13 +1,13 @@
-"""Alpaca client — an optional candle fallback.
+"""Alpaca client — batched quote freshness and an optional candle fallback.
 
-**BLOCKED** (docs/VERIFIED.md G-9): the supplied key pair was rejected with a
-clean ``401 unauthorized`` on both the paper and live trading hosts, and the data
-host too — not a header or whitespace problem (key 26 chars, secret 44 chars,
-sent verbatim). Alpaca is only a *candle fallback* (build prompt §5.1), so this is
-non-blocking: the adapter is built, fails soft, and reports ``BLOCKED`` from
-``health()`` until the key is regenerated.
+Alpaca's ``/v2/stocks/quotes/latest?symbols=...`` endpoint returns bid/ask for up
+to 40 symbols in one round trip, which is how the runtime gets a real spread for
+the tracked pool without a per-symbol request.
 
-Do not depend on Alpaca. The candle chain is TwelveData -> Yahoo -> Alpaca.
+**Key status** (docs/VERIFIED.md G-9): the originally supplied key pair was
+rejected with a clean ``401 unauthorized``. The adapter is built and fails soft —
+``health()`` reports ``BLOCKED`` until a working key is configured, and the
+runtime simply keeps the Finviz-only record. Do not depend on Alpaca.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from ..util import UTC
 log = logging.getLogger(__name__)
 
 DATA_BASE = "https://data.alpaca.markets"
+MAX_QUOTE_SYMBOLS = 40
 
 
 class AlpacaBlocked(SourceError):
@@ -74,6 +75,29 @@ class AlpacaClient(BaseClient):
         q = (data or {}).get("quote") or {}
         return {"bid": fnum(q.get("bp")), "ask": fnum(q.get("ap")),
                 "bid_size": fnum(q.get("bs")), "ask_size": fnum(q.get("as"))}
+
+    def latest_quotes(self, symbols: list[str]) -> dict[str, dict[str, Any]]:
+        """Batched quotes for up to ``MAX_QUOTE_SYMBOLS`` symbols in one request.
+
+        Returns ``{SYMBOL: {bid, ask, ts}}``; symbols with no usable quote are
+        omitted. Raises ``AlpacaBlocked``/``SourceError`` (callers fail soft).
+        """
+        syms = [s.upper() for s in dict.fromkeys(symbols) if s][:MAX_QUOTE_SYMBOLS]
+        if not syms:
+            return {}
+        data = self._get("/v2/stocks/quotes/latest", symbols=",".join(syms))
+        out: dict[str, dict[str, Any]] = {}
+        for sym, q in ((data or {}).get("quotes") or {}).items():
+            bid, ask = fnum((q or {}).get("bp")), fnum((q or {}).get("ap"))
+            if bid is None or ask is None or bid <= 0 or ask <= 0:
+                continue
+            ts = (q or {}).get("t")
+            out[sym.upper()] = {
+                "bid": bid, "ask": ask,
+                "ts": datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(UTC)
+                      if ts else None,
+            }
+        return out
 
     def health(self) -> tuple[bool, str]:
         if not self.cfg.raw("ALPACA_KEY"):

@@ -1,8 +1,8 @@
 """TradingView scanner client — keyless batch freshness quotes (one POST per cycle).
 
-Purpose: remove the TwelveData free-tier bottleneck. One scanner POST returns
-price/change/volume for every tracked symbol in a single round trip, so the paced
-one-quote-per-cycle TwelveData path is only a fallback.
+Purpose: a keyless batch freshness feed. One scanner POST returns
+price/change/volume for every tracked symbol in a single round trip, so the
+paced per-symbol quote path (Alpaca, then Finnhub) is only a fallback.
 
 **Column set is deliberately minimal** (``name, close, change, volume``). The
 commonly circulated payload also asks for ``close|15``/``volume|15``/
@@ -22,7 +22,7 @@ adapter. Until then the runtime treats every scanner result as a guarded hint:
 the price must stay within ``TRADINGVIEW_MAX_DEVIATION_PCT`` of the reconciled
 Finviz price, and it is never used outside the regular session (extended-hours
 truth stays with Finviz). Failures are ``SourceError`` — callers fall back to the
-paced TwelveData path or keep the Finviz price.
+Alpaca/Finnhub path or keep the Finviz price.
 """
 
 from __future__ import annotations

@@ -7,7 +7,7 @@ passing self-test is real evidence, not a mock.
 
 Checks:
 1. Config integrity — every setting has a unit (or is unitless) and a rationale.
-2. Fixtures parse — Finviz universe, TwelveData quote, Finnhub quote/status,
+2. Fixtures parse — Finviz universe, Finnhub quote/status,
    Alpha Vantage quote, Yahoo chart all parse into the shapes the adapters expect.
 3. DATA-01..12 — reconciliation tags basis, flags conflicts, fails closed on
    missing/stale data, and produces a grade.
@@ -34,7 +34,7 @@ from .config import BY_KEY, Config, SETTINGS
 from .gates import run_gates
 from .notifier import render_ignition
 from .sources import (AlphaVantageClient, FinnhubClient, FinvizClient,
-                      TwelveDataClient, YahooClient, parse_csv)
+                      YahooClient, parse_csv)
 from .sources.base import SourceError, fixture_text, load_fixture
 from .store import Store
 from .util import now_utc
@@ -86,10 +86,15 @@ def run(cfg: Config, verbose: bool = False) -> int:
                    "finviz: export guard")
         except SourceError:
             _check(True, "", results, "finviz: export guard fails loud on a bad set")
-        td = TwelveDataClient(cfg)
-        q = json.loads(fixture_text("twelvedata_quote.txt"))
-        _check("close" in q and "is_market_open" in q, "bad twelvedata quote", results,
-               "fixtures: twelvedata quote shape")
+        # Hard live-volume gate (section 2): a dead chart can never arm. This is
+        # the invariant that stops a $0-volume name from igniting.
+        from .gates import live_volume_reason
+        _check(live_volume_reason(None, None, cfg, "OPEN") == "NO_VOL_HISTORY"
+               and live_volume_reason(100.0, 1e6, cfg, "OPEN") == "RECENT_VOL_TOO_LOW"
+               and live_volume_reason(1e6, 100.0, cfg, "OPEN") == "DVOL_10M_TOO_LOW"
+               and live_volume_reason(1e6, 1e6, cfg, "OPEN") is None,
+               "live-volume gate not fail-closed", results,
+               "gates: live-volume gate fails closed")
         fh = json.loads(fixture_text("finnhub_quote.txt"))
         _check("c" in fh and "pc" in fh, "bad finnhub quote", results,
                "fixtures: finnhub quote shape")
@@ -148,11 +153,11 @@ def _reconcile_checks(cfg: Config, now, results, step) -> None:
 
     # two agreeing sources -> OK, two far-apart -> CONFLICT
     ok = reconcile_symbol("T", [PricePoint("finviz", 2.00, now, scope="SINGLE_VENUE"),
-                                PricePoint("twelvedata", 2.01, now)], cfg, "PRE", now=now)
+                                PricePoint("finnhub", 2.01, now)], cfg, "PRE", now=now)
     _check(ok.price_reason == N.R_OK, "agreeing sources flagged", results,
            "DATA-02 agreement is OK")
     confl = reconcile_symbol("T", [PricePoint("finviz", 2.00, now, scope="SINGLE_VENUE"),
-                                   PricePoint("twelvedata", 4.20, now)], cfg, "PRE", now=now)
+                                   PricePoint("finnhub", 4.20, now)], cfg, "PRE", now=now)
     _check(R_CONFLICT in confl.reasons, "far-apart sources not flagged", results,
            "DATA-02 conflict detected")
 

@@ -78,6 +78,21 @@ _GLOBAL: list[Setting] = [
     Setting("REVERSE_SPLIT_RECENT_D", "90", "days",
             "A reverse split within this window flags REVERSE_SPLIT_RECENT (DATA-07)."),
 
+    # --- hard live-volume gate (section 2) ---
+    # Fail closed on warmup/dead tape: whole-day volume is NOT enough to alert.
+    Setting("MIN_VOL_3M_SHARES", "25000", "shares",
+            "Minimum shares traded in the last 3 minutes (in-memory rolling delta). "
+            "Blocks ARMED/IGNITION on dead tape; None (warmup) also fails closed."),
+    Setting("MIN_DVOL_10M_REG", "75000", "USD",
+            "Minimum 10-minute rolling dollar volume in OPEN/MIDDAY."),
+    Setting("MIN_DVOL_10M_EXT", "25000", "USD",
+            "Minimum 10-minute rolling dollar volume in PRE/POST."),
+
+    # --- front-side structure (section 8) ---
+    Setting("MAX_DRAWDOWN_FROM_HOD_PCT", "12.0", "%",
+            "Block ARMED->IGNITION when price is more than this below the day high "
+            "(no backside-of-HOD fades)."),
+
     # --- gates (section 7) ---
     Setting("EXT_SPREAD_MULT", "1.5", "x", "POST/PRE spreads are looser by 1.5x (G-SPREAD)."),
     Setting("LIQ_15M_POST", "25000", "USD", "15-min dollar volume floor in POST (G-LIQ)."),
@@ -122,7 +137,7 @@ _GLOBAL: list[Setting] = [
     Setting("BOARD_MIN_DWELL_S", "60", "s", "Must stay top-5 this long to hold BOARD (hysteresis)."),
     Setting("BOARD_EXIT_RANK", "8", "rank", "Leaves BOARD only below this rank (hysteresis)."),
     Setting("ARM_MAX_RANK", "2", "rank", "ARMED requires rank <= this."),
-    Setting("ARM_MIN_SCORE", "63", "points", "ARMED requires score >= this."),
+    Setting("ARM_MIN_SCORE", "75", "points", "ARMED requires score >= this, re-checked every cycle while ARMED."),
     Setting("CHASE_CAP_PCT", "4.0", "%", "No ignition if price is >this% above the armed level."),
     Setting("EXT_CONFIRM_BARS", "2", "bars", "POST/PRE need this many confirming extended bars."),
     Setting("REG_CONFIRM_BARS", "1", "bars", "Regular hours need this many confirming bars."),
@@ -168,9 +183,8 @@ _GLOBAL: list[Setting] = [
 
     # --- source rate limits / caching (§4.4, doctor 429 fix) ---
     Setting("QUOTE_CACHE_TTL_S", "60", "s", "Reuse a successful per-symbol quote within this window instead of re-fetching."),
-    Setting("TWELVEDATA_MIN_INTERVAL_S", "8", "s", "Minimum spacing between TwelveData quote requests (~7.5/min, within the free-tier 8-credit/min budget)."),
     Setting("SOURCE_COOLDOWN_S", "60", "s", "After an HTTP 429 a source is put on cooldown for this long before its next call."),
-    Setting("TRADINGVIEW_ENABLED", "1", "bool", "Use the keyless TradingView scanner for batch freshness quotes; falls back to paced TwelveData when off/unavailable."),
+    Setting("TRADINGVIEW_ENABLED", "1", "bool", "Use the keyless TradingView scanner for batch freshness quotes; falls back to Alpaca/Finnhub when off/unavailable."),
     Setting("TRADINGVIEW_TIMEOUT_S", "10", "s", "HTTP timeout for one batch scanner POST."),
     Setting("TRADINGVIEW_CACHE_TTL_S", "10", "s", "Reuse one batch scanner result for this window (at most one POST per cycle)."),
     Setting("TRADINGVIEW_MAX_DEVIATION_PCT", "20", "%", "Drop a scanner price that deviates from the reconciled Finviz price by more than this (unverified feed stays out of the decision path)."),
@@ -181,6 +195,18 @@ _GLOBAL: list[Setting] = [
 
     # --- retention / ops (section 13, 15) ---
     Setting("RAW_RETENTION_DAYS", "7", "days", "Delete raw_payloads and non-qualified per-cycle data older than this."),
+    Setting("RAW_RETENTION_HOURS", "24", "hours",
+            "Delete raw_payloads older than this (24h keeps replay/recent debugging only)."),
+    Setting("CAND_RETENTION_HOURS", "48", "hours",
+            "Delete non-board candidates/decisions older than this; board/armed/ignition rows are kept."),
+    Setting("DB_PRUNE_INTERVAL_S", "3600", "s",
+            "Run the retention + incremental-vacuum pass this often (and once at startup)."),
+    Setting("CAND_JSON_TOP_N", "50", "rank",
+            "Keep full gate/feature JSON only for this many top names; other rows store compact reasons."),
+    Setting("MEMORY_TTL_S", "7200", "s",
+            "Evict per-symbol in-memory dictionaries after this long out of the active universe."),
+    Setting("VOL_HISTORY_RESTORE_MIN", "15", "minutes",
+            "On restart, rehydrate the rolling volume history from this recent window."),
     Setting("DISK_WARN_PCT", "10", "%", "Warn once when free disk falls under this."),
     Setting("QUIET_HOURS", "", "HH:MM-HH:MM,mode", "Optional per-mode quiet hours (none by default, §18.5)."),
 
@@ -199,7 +225,6 @@ _GLOBAL: list[Setting] = [
     # --- secrets (never displayed / never logged) ---
     Setting("FINVIZ_TOKEN", "", "", "Finviz Elite token.", secret=True),
     Setting("FINVIZ_BASE", "https://elite.finviz.com", "url", "Finviz base URL."),
-    Setting("TWELVEDATA_KEY", "", "", "TwelveData API key.", secret=True),
     Setting("FINNHUB_KEY", "", "", "Finnhub API key.", secret=True),
     Setting("ALPHA_VANTAGE_KEY", "", "", "Alpha Vantage API key.", secret=True),
     Setting("ALPACA_KEY", "", "", "Alpaca API key id.", secret=True),
@@ -272,6 +297,7 @@ class Config:
         self.path = Path(path or env_path or (Path.home() / ".rotd" / "rotd.env"))
         self._values: dict[str, str] = {}
         self._mtime: float = -1.0
+        self._dirty = False   # a key changed in-process; clients must be rebuilt
         self._overrides = dict(overrides or {})
         self._load()
 
@@ -365,8 +391,25 @@ class Config:
     def set(self, key: str, value: str) -> None:
         self._values[key] = str(value)
 
+    def take_dirty(self) -> bool:
+        """True once after a live key change (``/setkey``, ``/setbudget``).
+
+        ``append_to_file`` refreshes ``_mtime`` itself, so ``reload_if_changed``
+        cannot see the write; the listen daemon needs this separate flag to know
+        that the credentials in memory changed and the source clients must be
+        rebuilt.
+        """
+        was = self._dirty
+        self._dirty = False
+        return was
+
     def append_to_file(self, key: str, value: str) -> None:
-        """Persist one key to the config file (created if missing, mode 600)."""
+        """Persist one key to the config file atomically (created if missing, mode 600).
+
+        Write a sibling temp file, fsync, then ``os.replace``: a crash mid-write
+        can never leave the daemon reading a truncated config (the listener reloads
+        this file live, §14.4).
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         existing = ""
         if self.path.exists():
@@ -374,9 +417,23 @@ class Config:
         lines = [ln for ln in existing.splitlines()
                  if not ln.strip().startswith(f"{key}=")]
         lines.append(f"{key}={value}")
-        self.path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(lines) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            restrict_permissions(tmp)
+            os.replace(tmp, self.path)
+        finally:
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
         restrict_permissions(self.path)
         self.set(key, value)
+        self._dirty = True
         self._mtime = self._stat_mtime()
 
     def ensure_exists(self) -> None:

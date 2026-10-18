@@ -15,12 +15,14 @@ from rotd.features import compute_features
 from rotd.gates import run_gates
 from rotd.normalize import Canonical
 from rotd.scoring import rank, score_candidate
-from rotd.state_machine import (R_ARM_STEP_RANK, R_ARM_STEP_SCORE, State,
-                                StateMachine)
+from rotd.state_machine import (R_ARM_STEP_RANK, R_ARM_STEP_SCORE,
+                                R_ARM_STEP_VOL, State, StateMachine)
 from rotd.util import UTC
 
 DAY = date(2026, 10, 13)
 T0 = datetime(2026, 10, 13, 14, 0, tzinfo=UTC)
+# Healthy live tape: the hard volume gate must not be what these tests exercise.
+LIVE = {"EXMP": {"vol_3m": 1_000_000.0, "dvol_10m": 10_000_000.0}}
 
 
 def _rec(symbol="EXMP", price=2.31) -> Canonical:
@@ -68,7 +70,7 @@ def _armed_machine(cfg: Config):
     states = []
     for i in range(6):
         ts = T0 + timedelta(seconds=30 * i)
-        for t in sm.step(rk, snap.records, "OPEN", now=ts, prices=prices):
+        for t in sm.step(rk, snap.records, "OPEN", now=ts, prices=prices, live=LIVE):
             states.append(t.new_state)
     assert State.ARMED in states, states
     assert sm.states[rec.symbol].state == State.ARMED
@@ -87,7 +89,7 @@ def test_armed_steps_down_when_rank_slips(cfg: Config):
                   components=sc_ours.components)
     forced = Ranking(day_ranked=higher + [ours], board=higher + [ours])
     ts = T0 + timedelta(seconds=330)
-    transitions = sm.step(forced, snap.records, "OPEN", now=ts, prices=prices)
+    transitions = sm.step(forced, snap.records, "OPEN", now=ts, prices=prices, live=LIVE)
     demotions = [t for t in transitions
                  if t.symbol == rec.symbol and t.reason == R_ARM_STEP_RANK]
     assert demotions, [(t.symbol, t.reason, t.new_state) for t in transitions]
@@ -100,7 +102,7 @@ def test_armed_steps_down_when_score_slips(cfg: Config):
     # Now demand a score the name cannot meet.
     cfg._values["ARM_MIN_SCORE"] = "1000"
     ts = T0 + timedelta(seconds=330)
-    transitions = sm.step(rk, snap.records, "OPEN", now=ts, prices=prices)
+    transitions = sm.step(rk, snap.records, "OPEN", now=ts, prices=prices, live=LIVE)
     demotions = [t for t in transitions
                  if t.symbol == rec.symbol and t.reason == R_ARM_STEP_SCORE]
     assert demotions, [(t.symbol, t.reason) for t in transitions]
@@ -114,7 +116,7 @@ def test_demoted_name_does_not_accrue_confirmation(cfg: Config):
     cfg._values["ARM_MIN_SCORE"] = "1000"
     for i in range(4):
         ts = T0 + timedelta(seconds=330 + 30 * i)
-        transitions = sm.step(rk, snap.records, "OPEN", now=ts, prices=prices)
+        transitions = sm.step(rk, snap.records, "OPEN", now=ts, prices=prices, live=LIVE)
         assert not any(t.symbol == rec.symbol and t.new_state == State.IGNITION
                        for t in transitions)
         assert sm.states[rec.symbol].confirm_bars == 0
@@ -135,7 +137,39 @@ def test_healthy_armed_name_still_ignites(cfg: Config):
     ignited = False
     for i in range(8):
         ts = T0 + timedelta(seconds=30 * i)
-        for t in sm.step(rk, snap.records, "OPEN", now=ts, prices=prices):
+        for t in sm.step(rk, snap.records, "OPEN", now=ts, prices=prices, live=LIVE):
             if t.symbol == rec.symbol and t.new_state == State.IGNITION:
                 ignited = True
     assert ignited, "a name holding its rank/score must still ignite"
+
+
+def test_armed_steps_down_when_live_volume_dies(cfg: Config):
+    """Tape that goes quiet mid-confirmation is a demotion, not a slow ignition."""
+    sm, rec, snap, rk, prices = _armed_machine(cfg)
+    dead = {"EXMP": {"vol_3m": 100.0, "dvol_10m": 1_000.0}}
+    ts = T0 + timedelta(seconds=330)
+    transitions = sm.step(rk, snap.records, "OPEN", now=ts, prices=prices, live=dead)
+    demotions = [t for t in transitions
+                 if t.symbol == rec.symbol and t.reason == R_ARM_STEP_VOL]
+    assert demotions, [(t.symbol, t.reason) for t in transitions]
+    assert sm.states[rec.symbol].state != State.ARMED
+    assert sm.states[rec.symbol].confirm_bars == 0
+
+
+def test_no_volume_history_never_arms(cfg: Config):
+    """Fail closed: with no live-volume history a name can never reach ARMED."""
+    cfg._values["QUALIFY_CONSEC"] = "1"
+    cfg._values["ARM_MIN_SCORE"] = "0"
+    cfg._values["ARM_MAX_RANK"] = "5"
+    sm = StateMachine(cfg, DAY)
+    rec = _rec()
+    snap, fs, rep, sc = _gate(cfg, rec)
+    rk = rank([sc], cfg)
+    prices = {rec.symbol: rec.price}
+    states = []
+    for i in range(6):
+        ts = T0 + timedelta(seconds=30 * i)
+        for t in sm.step(rk, snap.records, "OPEN", now=ts, prices=prices):
+            states.append((t.new_state, t.reason))
+    assert not any(s == State.ARMED for s, _ in states), states
+    assert any(r == "NO_VOL_HISTORY" for _, r in states), states

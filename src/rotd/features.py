@@ -133,6 +133,12 @@ def compute_features(rec: Canonical, cfg: Config, snap: Snapshot,
         gc = safe_div(rec.price - rec.prev_close, rec.prev_close) * 100.0 if rec.prev_close else None
         fs.add(Feature("gain_from_prev_close", gc, "%",
                        "" if gc is not None else M_NO_PREV, basis=basis, scope=scope))
+        # POST: the after-hours move vs today's 16:00 ET regular close. Scoring
+        # uses this in POST so a 10:00 AM spike cannot carry an after-hours alert.
+        ah = getattr(rec, "ah_change_pct", None)
+        fs.add(Feature("ah_change_pct", ah, "%",
+                       "" if ah is not None else M_NO_PREV, basis=basis, scope=scope,
+                       window="AH"))
 
         # RVOL — needs a volume with a known basis and comparable history (DATA-04).
         if rec.volume is None:
@@ -184,6 +190,17 @@ def compute_features(rec: Canonical, cfg: Config, snap: Snapshot,
     if rec.price and rec.day_high:
         fs.add(Feature("new_high_flag", 1.0 if rec.price >= rec.day_high * 0.999 else 0.0,
                        "bool", basis=basis))
+        dd = safe_div(rec.day_high - rec.price, rec.day_high) * 100.0
+        fs.add(Feature("drawdown_from_hod_pct", dd, "%", basis=basis))
+    else:
+        fs.add(Feature("drawdown_from_hod_pct", None, "%", missing_reason=M_NO_HISTORY))
+
+    # float rotation: whole-day volume as a multiple of the free float.
+    if rec.volume is not None and rec.shares_float:
+        fs.add(Feature("float_rotation", rec.volume / rec.shares_float, "x",
+                       basis=rec.volume_basis))
+    else:
+        fs.add(Feature("float_rotation", None, "x", missing_reason=M_NO_FLOAT))
 
     # --- catalyst ---
     fs.add(Feature("catalyst_score", catalyst_score, "0-100",

@@ -86,10 +86,10 @@ def test_data_basis_by_mode():
 def test_data_conflict_and_stale_fail_closed(cfg: Config):
     now = datetime(2026, 10, 13, 14, 0, tzinfo=UTC)
     ok = reconcile_symbol("T", [PricePoint("finviz", 2.00, now, scope="SINGLE_VENUE"),
-                                PricePoint("twelvedata", 2.005, now)], cfg, "OPEN", now=now)
+                                PricePoint("finnhub", 2.005, now)], cfg, "OPEN", now=now)
     assert ok.price is not None
     bad = reconcile_symbol("T", [PricePoint("finviz", 2.00, now, scope="SINGLE_VENUE"),
-                                 PricePoint("twelvedata", 4.20, now)], cfg, "OPEN", now=now)
+                                 PricePoint("finnhub", 4.20, now)], cfg, "OPEN", now=now)
     assert R_CONFLICT in bad.reasons
     stale = reconcile_symbol("T", [PricePoint("finviz", 2.0, now - timedelta(seconds=9999),
                                               scope="SINGLE_VENUE")], cfg, "OPEN", now=now)
@@ -193,17 +193,18 @@ def test_state_machine_ladder_and_budget(cfg: Config):
     assert rep.passed, rep.summary()
     rk = rank([sc], cfg)
     prices = {"EXMP": rec.price}
+    live = {"EXMP": {"vol_3m": 1_000_000.0, "dvol_10m": 10_000_000.0}}
     t0 = datetime(2026, 10, 13, 14, 0, tzinfo=UTC)
 
     # cycle 1: WATCH -> WATCH (pending consecutive)
-    t1 = sm.step(rk, snap.records, "OPEN", now=t0, prices=prices)
+    t1 = sm.step(rk, snap.records, "OPEN", now=t0, prices=prices, live=live)
     assert any(t.new_state == State.WATCH for t in t1)
     # cycle 2: the ladder WATCH -> QUALIFIED -> BOARD -> ARMED -> IGNITION
     spent = 0
     ladder = []
     for i in range(2, 8):
         ts = t0 + timedelta(seconds=30 * (i - 1))
-        for t in sm.step(rk, snap.records, "OPEN", now=ts, prices=prices):
+        for t in sm.step(rk, snap.records, "OPEN", now=ts, prices=prices, live=live):
             ladder.append(t.new_state)
             if t.new_state == State.IGNITION and t.spend:
                 spent += 1
@@ -216,7 +217,8 @@ def test_transitions_carry_reason_codes(cfg: Config):
     snap, rec, fs, rep, sc = _gated(cfg, _runner())
     rk = rank([sc], cfg)
     ts = datetime(2026, 10, 13, 14, 0, tzinfo=UTC)
-    transitions = sm.step(rk, snap.records, "OPEN", now=ts, prices={"EXMP": rec.price})
+    transitions = sm.step(rk, snap.records, "OPEN", now=ts, prices={"EXMP": rec.price},
+                live={"EXMP": {"vol_3m": 1_000_000.0, "dvol_10m": 10_000_000.0}})
     assert transitions
     for t in transitions:
         assert t.reason, "every transition must carry a reason code"

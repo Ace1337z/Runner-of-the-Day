@@ -4,7 +4,7 @@
 #
 # Usage (run directly, NOT piped into bash, so it can read your answers):
 #
-#   wget -O install.sh https://raw.githubusercontent.com/Ace1337z/big-whale-penny-tracker/main/install.sh
+#   wget -O install.sh https://raw.githubusercontent.com/Ace1337z/Runner-of-the-Day/main/install.sh
 #   bash install.sh
 #
 # Keep the exact filename with `wget -O install.sh`; otherwise a repeat download
@@ -17,7 +17,7 @@
 #   ROTD_NONINTERACTIVE=1
 #   ROTD_INSTALL_DIR=/opt/rotd
 #   ROTD_VERSION=main            # or a tag such as v1.0.0
-#   ROTD_URL=https://github.com/Ace1337z/big-whale-penny-tracker
+#   ROTD_URL=https://github.com/Ace1337z/Runner-of-the-Day
 #   TELEGRAM_TOKEN=... TELEGRAM_CHAT_ID=...   # the only required credentials
 #
 # Setup asks for Telegram only, so the bot can be reached and every other key
@@ -26,7 +26,7 @@
 #
 set -euo pipefail
 
-REPO_DEFAULT="https://github.com/Ace1337z/big-whale-penny-tracker"
+REPO_DEFAULT="https://github.com/Ace1337z/Runner-of-the-Day"
 INSTALL_DIR="${ROTD_INSTALL_DIR:-/opt/rotd}"
 ROTD_URL="${ROTD_URL:-$REPO_DEFAULT}"
 ROTD_VERSION="${ROTD_VERSION:-main}"
@@ -88,12 +88,11 @@ fi
 # Every optional credential is read from the environment only (not prompted). Set
 # any of these to pre-fill them; otherwise use /setkey KEY VALUE from the chat.
 FINVIZ_TOKEN="${FINVIZ_TOKEN:-}"
-TWELVEDATA_KEY="${TWELVEDATA_KEY:-}"
 FINNHUB_KEY="${FINNHUB_KEY:-}"
 ALPHA_VANTAGE_KEY="${ALPHA_VANTAGE_KEY:-}"
 ALPACA_KEY="${ALPACA_KEY:-}"; ALPACA_SECRET="${ALPACA_SECRET:-}"
 SEC_USER_AGENT="${SEC_USER_AGENT:-}"
-OPENAI_BASE_URL="${OPENAI_BASE_URL:-}"; OPENAI_API_KEY="${OPENAI_API_KEY:-}"; OPENAI_MODEL="${OPENAI_MODEL:-}"
+AI_BASE_URL="${AI_BASE_URL:-}"; AI_KEY="${AI_KEY:-}"; AI_MODEL="${AI_MODEL:-}"
 
 # --- 2. system packages ----------------------------------------------------
 info "Step 2/9: system packages"
@@ -147,9 +146,9 @@ CONFIG_FILE="$INSTALL_DIR/config.env"
 if [[ -f "$CONFIG_FILE" ]]; then
     info "existing configuration found; values are kept unless you overwrite them"
 fi
-export TELEGRAM_TOKEN TELEGRAM_CHAT_ID FINVIZ_TOKEN TWELVEDATA_KEY FINNHUB_KEY
+export TELEGRAM_TOKEN TELEGRAM_CHAT_ID FINVIZ_TOKEN FINNHUB_KEY
 export ALPHA_VANTAGE_KEY ALPACA_KEY ALPACA_SECRET SEC_USER_AGENT
-export OPENAI_BASE_URL OPENAI_API_KEY OPENAI_MODEL
+export AI_BASE_URL AI_KEY AI_MODEL
 "$ROTD" --config "$CONFIG_FILE" setup --non-interactive --skip-doctor
 chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 

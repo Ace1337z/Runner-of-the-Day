@@ -38,6 +38,7 @@ from enum import Enum
 from typing import Any, Optional
 
 from .config import Config
+from .gates import R_BACKSIDE_OF_HOD, backside_of_hod, live_volume_reason
 from .scoring import Ranking, Scored
 from .util import as_utc, now_utc
 
@@ -68,6 +69,7 @@ R_ARM_RANK = "ARM_RANK_TOO_LOW"
 R_ARM_SCORE = "ARM_SCORE_TOO_LOW"
 R_ARM_STEP_RANK = "ARM_STEP_DOWN_RANK"
 R_ARM_STEP_SCORE = "ARM_STEP_DOWN_SCORE"
+R_ARM_STEP_VOL = "ARM_STEP_DOWN_VOL"
 R_IGNITE = "IGNITION_CONFIRMED"
 R_IGNITE_BUDGET = "IGNITION_BUDGET_EXHAUSTED"
 R_IGNITE_DUP = "IGNITION_ALREADY_TODAY"
@@ -147,6 +149,18 @@ class Budget:
             return f"{self.used + 1}/{self.limit}"
         return "RESERVE"
 
+    def reset(self) -> None:
+        """Clear today's spend (Telegram ``/resetbudget``)."""
+        self.spent.clear()
+        self.reserve_spent = 0
+        self.ignited_symbols.clear()
+        self.last_ignition_at = None
+
+    def relabel(self, limit: int, reserve: int) -> None:
+        """Apply a live ``/setbudget`` change without losing today's spend."""
+        self.limit = max(0, limit)
+        self.reserve = max(0, reserve)
+
 
 @dataclass
 class SymbolState:
@@ -173,7 +187,7 @@ class StateMachine:
         self.cfg = cfg
         self.day = day
         self.states: dict[str, SymbolState] = {}
-        self.budget = Budget(day=day, limit=cfg.int("ALERT_BUDGET_PER_DAY", 3),
+        self.budget = Budget(day=day, limit=cfg.int("ALERT_BUDGET_PER_DAY", 5),
                              reserve=cfg.int("RESERVE_SLOTS", 1))
 
     def _st(self, symbol: str) -> SymbolState:
@@ -187,11 +201,28 @@ class StateMachine:
              now: Optional[datetime] = None,
              prices: Optional[dict[str, float]] = None,
              vwaps: Optional[dict[str, float]] = None,
-             data_grade: str = "A") -> list[Transition]:
-        """Advance every symbol one cycle and return the transitions."""
+             data_grade: str = "A",
+             live: Optional[dict[str, dict[str, Optional[float]]]] = None,
+             ) -> list[Transition]:
+        """Advance every symbol one cycle and return the transitions.
+
+        ``live`` carries the short-term tape per symbol
+        (``{"vol_3m": shares, "dvol_10m": USD}``). It is required for ARMED:
+        a name with no live-volume history fails closed (``NO_VOL_HISTORY``),
+        because whole-day volume can never stand in for tape trading now.
+        """
         now = as_utc(now or now_utc())
         prices = prices or {}
         vwaps = vwaps or {}
+        live = live or {}
+
+        def _live(sym: str) -> tuple[Optional[float], Optional[float]]:
+            d = live.get(sym) or {}
+            return d.get("vol_3m"), d.get("dvol_10m")
+
+        def _vol_reason(sym: str) -> Optional[str]:
+            v3, dv10 = _live(sym)
+            return live_volume_reason(v3, dv10, self.cfg, mode)
         out: list[Transition] = []
 
         board_syms = {s.symbol for s in ranking.board}
@@ -279,6 +310,13 @@ class StateMachine:
                 if score < self.cfg.float("ARM_MIN_SCORE", 75):
                     out.append(Transition(sym, prev, prev, R_ARM_SCORE, f"score {score:.1f}"))
                     continue
+                # HARD live-volume gate (section 2): a dead chart cannot arm.
+                vol_reason = _vol_reason(sym)
+                if vol_reason:
+                    v3, dv10 = _live(sym)
+                    out.append(Transition(sym, prev, prev, vol_reason,
+                                          f"vol_3m {v3} dvol_10m {dv10}"))
+                    continue
                 price = prices.get(sym)
                 if price is None and rec is not None:
                     price = getattr(rec, "price", None)
@@ -312,7 +350,24 @@ class StateMachine:
                     out.append(self._move(st, back, R_ARM_STEP_SCORE, f"score {score:.1f}"))
                     prev = st.state
                     continue
+                # Same hard live-volume gate on every ARMED cycle: tape that goes
+                # quiet mid-confirmation is a demotion, not a slow ignition.
+                vol_reason = _vol_reason(sym)
+                if vol_reason:
+                    st.confirm_bars = 0
+                    back = State.BOARD if sym in board_syms else State.QUALIFIED
+                    v3, dv10 = _live(sym)
+                    out.append(self._move(st, back, R_ARM_STEP_VOL,
+                                          f"{vol_reason} vol_3m {v3} dvol_10m {dv10}"))
+                    prev = st.state
+                    continue
                 price = prices.get(sym) or (getattr(rec, "price", None) if rec else None)
+                # Backside of the high: never ignite a name already rolling over.
+                if rec is not None and backside_of_hod(price, getattr(rec, "day_high", None),
+                                                       self.cfg):
+                    out.append(Transition(sym, prev, State.ARMED, R_BACKSIDE_OF_HOD,
+                                          f"{price} vs hod {getattr(rec, 'day_high', None)}"))
+                    continue
                 armed = st.armed_level
                 # Chase cap: never ignite far above the armed level.
                 if price and armed and armed > 0:

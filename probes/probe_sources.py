@@ -115,24 +115,6 @@ def probe_finviz() -> None:
     save("finviz_news", st3, body3)
 
 
-def probe_twelvedata() -> None:
-    key = ENV.get("TWELVEDATA_KEY", "")
-    base = "https://api.twelvedata.com"
-    # Quote for a very liquid name; also a 1-min bar series.
-    url = f"{base}/quote?" + urllib.parse.urlencode({"symbol": "AAPL", "apikey": key})
-    st, _, body, _ = get(url)
-    save("twelvedata_quote", st, body)
-    url2 = f"{base}/time_series?" + urllib.parse.urlencode(
-        {"symbol": "AAPL", "interval": "1min", "outputsize": "10", "apikey": key})
-    st2, _, body2, _ = get(url2)
-    save("twelvedata_time_series", st2, body2)
-    # Extended-hours check: a pre-market window on the most recent session.
-    url3 = f"{base}/time_series?" + urllib.parse.urlencode(
-        {"symbol": "AAPL", "interval": "1min", "outputsize": "5", "prepost": "true", "apikey": key})
-    st3, _, body3, _ = get(url3)
-    save("twelvedata_prepost", st3, body3)
-
-
 def probe_finnhub() -> None:
     key = ENV.get("FINNHUB_KEY", "")
     base = "https://finnhub.io/api/v1"
@@ -228,7 +210,6 @@ def probe_finra() -> None:
 
 PROBES = {
     "finviz": probe_finviz,
-    "twelvedata": probe_twelvedata,
     "finnhub": probe_finnhub,
     "alpaca": probe_alpaca,
     "alpha_vantage": probe_alpha_vantage,

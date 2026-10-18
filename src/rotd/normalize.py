@@ -107,6 +107,13 @@ class Canonical:
     day_low: Optional[float] = None
     open: Optional[float] = None
     after_close: Optional[float] = None
+    regular_close: Optional[float] = None   # today's 16:00 ET close (POST baseline)
+    ah_change_pct: Optional[float] = None   # extended move vs regular_close (POST)
+    ah_price: Optional[float] = None        # live extended-hours price (POST)
+    vwap: Optional[float] = None            # rolling session VWAP from vol history
+    float_rotation: Optional[float] = None  # volume / shares_float
+    vol_3m: Optional[float] = None          # shares traded in the last 3 minutes
+    dollar_volume_10m: Optional[float] = None  # USD traded in the last 10 minutes
     shares_float: Optional[float] = None
     float_reason: str = R_MISSING
     short_float: Optional[float] = None
@@ -359,7 +366,7 @@ def snapshot_from_finviz_rows(rows: list[dict[str, Any]], cfg: Config, mode: str
     """Build a snapshot from Finviz parsed rows plus optional extra source points.
 
     Finviz supplies the universe/quote layer; ``extra_points`` lets a fresher feed
-    (e.g. TwelveData) join the reconciliation for the symbols it covers.
+    (e.g. Alpaca quotes) join the reconciliation for the symbols it covers.
     """
     now = as_utc(cycle_ts or now_utc())
     basis = choose_basis(mode)
@@ -396,5 +403,19 @@ def snapshot_from_finviz_rows(rows: list[dict[str, Any]], cfg: Config, mode: str
                                    "day_low": row.get("low"),
                                    "market_cap": row.get("market_cap"),
                                })
+        # POST: Finviz's plain Price is today's frozen 16:00 ET close and
+        # After-Hours Close is the live extended print. Score after-hours
+        # momentum against the regular close, not yesterday's close (section 3).
+        if mode == "POST":
+            regular = row.get("price")
+            ext = row.get("after_close")
+            if regular:
+                rec.regular_close = regular
+            if ext:
+                rec.ah_price = ext
+                rec.ah_change_pct = (row.get("after_change_pct")
+                                     if row.get("after_change_pct") is not None
+                                     else (safe_div(ext - regular, regular) * 100.0
+                                           if regular else None))
         out.append(rec)
     return build_snapshot(out, trading_day, mode, cycle_ts=now, source_health=source_health)

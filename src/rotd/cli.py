@@ -78,6 +78,24 @@ def _build(cfg: Config, store: Store, use_fake_telegram: bool = False):
     return rt, clients, tg
 
 
+def _reload_live(rt, cfg: Config, store: Store, tg) -> None:
+    """Apply a live ``config.env`` edit without a restart (item 5).
+
+    ``/setkey`` writes the file; the daemon must pick the new credentials up on
+    the next cycle. Rebuilding the clients also clears their caches/cooldowns so
+    a corrected key is not masked by the old one's 401.
+    """
+    clients = build_clients(cfg)
+    rt.clients = clients
+    rt.catalyst = CatalystService(cfg, store)
+    rt.notifier.cfg = cfg
+    rt.notifier.client = tg
+    tg.cfg = cfg
+    if hasattr(tg, "secrets"):
+        tg.secrets = list(cfg.secret_values)
+    log.info("listen: config reloaded; clients rebuilt (%s)", ", ".join(sorted(clients)))
+
+
 # --- commands --------------------------------------------------------------
 
 def cmd_doctor(cfg: Config, args: argparse.Namespace) -> int:
@@ -279,6 +297,7 @@ def cmd_listen(cfg: Config, args: argparse.Namespace) -> int:
     from . import shadow
     store = Store(cfg.db_path)
     rt, clients, tg = _build(cfg, store, use_fake_telegram=not cfg.raw("TELEGRAM_TOKEN"))
+    _maintain(cfg, store)  # retention + space reclaim once at startup (item 6)
     si0 = session_info()
     # Shadow gate: do NOT push live until the clock completes. We still run cycles
     # (logging) and we DO answer Telegram commands so /setkey keeps working.
@@ -337,7 +356,10 @@ def cmd_listen(cfg: Config, args: argparse.Namespace) -> int:
                 offset = _listen_reply(cfg, store, tg, offset, split, rt=rt)
                 # 4. finish the interval, then apply any /setkey edits
                 time.sleep(max(0.5, poll_s - 2 * split))
-                cfg.reload_if_changed()
+                changed = cfg.reload_if_changed()
+                if cfg.take_dirty() or changed:
+                    _reload_live(rt, cfg, store, tg)
+                _maintain(cfg, store)
             except Exception as exc:  # noqa: BLE001 - one bad command or a network
                 # blip must never kill the daemon (that would loop under Restart=always
                 # and look like multi-second reply delays). Log and keep going.
@@ -359,6 +381,23 @@ def cmd_listen(cfg: Config, args: argparse.Namespace) -> int:
         pass
     store.close()
     return 0
+
+
+def _maintain(cfg: Config, store: Store) -> None:
+    """Run retention + space reclaim at most once per ``DB_PRUNE_INTERVAL_S`` (item 6)."""
+    import time as _time
+    every = cfg.int("DB_PRUNE_INTERVAL_S", 3600)
+    now = _time.monotonic()
+    if now - _maintain.last < max(60, every):
+        return
+    _maintain.last = now
+    try:
+        store.maintain(cfg)
+    except Exception as exc:  # noqa: BLE001 - maintenance never kills the daemon
+        log.warning("listen: maintenance pass failed: %s", exc)
+
+
+_maintain.last = 0.0  # type: ignore[attr-defined]
 
 
 def _assert_menu(cfg, tg) -> None:
@@ -575,7 +614,11 @@ def cmd_setup(cfg: Config, args: argparse.Namespace) -> int:
     non_interactive = args.non_interactive or not sys.stdin.isatty()
     if non_interactive:
         print("non-interactive mode: reading values from the environment")
-        for key in SETUP_ORDER:
+        # Every known setting is accepted (TELEGRAM_* first, then sources/AI), so
+        # `FINVIZ_TOKEN=... bash install.sh` actually pre-seeds the config.
+        from .config import SETTINGS
+        order = SETUP_ORDER + [s.key for s in SETTINGS if s.key not in SETUP_ORDER]
+        for key in order:
             env = os.environ.get(key)
             if env:
                 cfg.append_to_file(key, env)

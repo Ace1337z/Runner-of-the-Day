@@ -3,8 +3,9 @@
 This is the only place that fetches. A cycle:
 
 1. determines the mode and trading day (``calendar_us``);
-2. fetches the universe + quotes (Finviz) and, for the names it tracks, a fresher
-   quote (TwelveData) — all raw fetches happen here, once;
+2. fetches the universe (Finviz) and, for the names it tracks, a fresher
+   quote (keyless TradingView scanner, then Alpaca/Finnhub) — all raw fetches
+   happen here, once;
 3. reconciles them into **one** snapshot (``normalize``);
 4. computes features, runs gates, scores and ranks (``features``/``gates``/``scoring``);
 5. advances the state machine and spends the alert budget (``state_machine``);
@@ -17,6 +18,7 @@ inputs (AC1/S5), so ``rotd replay`` can re-run it byte-for-byte.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from collections import deque
@@ -40,6 +42,17 @@ from .tracker import PathTracker, Runner, build_runner_list
 from .util import as_utc, fmt_ts, now_utc, sha256_hex
 
 log = logging.getLogger(__name__)
+
+
+def _compact_gates(rep: GateReport) -> dict[str, Any]:
+    """Compact gate record for non-board rows (item 6): failures only, no detail.
+
+    The full per-gate JSON for 3,000 symbols per tick is what grew the DB to
+    93 GB. Failing gates are the only ones that carry information for a name that
+    did not pass, and their detail strings are the bulk of the payload.
+    """
+    return {r.gate: {"pass": r.passed, "reason": r.reason}
+            for r in rep.results if not r.passed} or {"pass": True}
 
 
 @dataclass
@@ -76,9 +89,11 @@ class Runtime:
         self._vol_history: dict[str, deque] = {}   # (now, cumulative volume) per symbol
         self._catalyst_items: dict[str, list[dict[str, Any]]] = {}
         self._first_seen: dict[str, datetime] = {}
+        self._last_touch: dict[str, datetime] = {}
+        self._sec_tickers: Optional[dict[str, dict[str, Any]]] = None
         self._universe: set[str] = set()
         self._data_grades: list[str] = []
-        self._fresh_cursor = 0  # rotates the TwelveData freshness quote across the board
+        self._fresh_cursor = 0  # rotates the Finnhub freshness quote across the pool
 
     def _ensure_day(self, day: date) -> None:
         if self._day != day:
@@ -88,7 +103,98 @@ class Runtime:
             self._vol_history.clear()
             self._catalyst_items.clear()
             self._first_seen.clear()
+            self._last_touch.clear()
             self._data_grades = []
+            self._warm_boot(day)
+
+    # -- warm boot (item 7) -------------------------------------------------
+    def _warm_boot(self, day: date) -> None:
+        """Rehydrate the per-day state a restart would otherwise lose.
+
+        - ``_vol_history`` from the last ``VOL_HISTORY_RESTORE_MIN`` of snapshots
+          (each snapshot carries the tracked pool's cumulative volumes), so the
+          hard live-volume gate is not blind for its first 3 minutes after a
+          restart;
+        - BOARD/ARMED states from today's decisions;
+        - the alert budget already spent today from ``alerts``.
+        """
+        if self.store is None or self.sm is None:
+            return
+        mins = self.cfg.int("VOL_HISTORY_RESTORE_MIN", 15)
+        cutoff = (now_utc() - timedelta(minutes=mins)).isoformat()
+        try:
+            rows = self.store.query(
+                "SELECT cycle_ts, quality_json FROM snapshots "
+                "WHERE trading_day=? AND cycle_ts>=? ORDER BY cycle_ts",
+                (day.isoformat(), cutoff))
+        except Exception as exc:  # noqa: BLE001 - a corrupt row must not block a cycle
+            log.warning("warm boot: snapshot history unavailable: %s", exc)
+            rows = []
+        for row in rows:
+            try:
+                q = json.loads(row["quality_json"] or "{}")
+            except ValueError:
+                continue
+            ts = datetime.fromisoformat(str(row["cycle_ts"]).replace("Z", "+00:00"))
+            for sym, vol in (q.get("volumes") or {}).items():
+                if vol is None:
+                    continue
+                self._vol_history.setdefault(sym, deque(maxlen=60)).append(
+                    (as_utc(ts), float(vol), q.get("prices", {}).get(sym)))
+        # Derive the deltas/VWAP the live cycle would have computed, so the hard
+        # volume gate is armed on the very first cycle after a restart.
+        for sym, dq in self._vol_history.items():
+            if not dq:
+                continue
+            hist = self._history.setdefault(sym, {})
+            last_ts = dq[-1][0]
+            v3 = self._delta_volume(dq, last_ts, 180.0)
+            v10 = self._delta_volume(dq, last_ts, 600.0)
+            if v3 is not None:
+                hist["vol_3m"] = v3
+            if v10 is not None and dq[-1][2]:
+                hist["dollar_volume_10m"] = v10 * dq[-1][2]
+            vwap = self._rolling_vwap(dq)
+            if vwap is not None:
+                hist["vwap"] = vwap
+        try:
+            self._restore_states(day)
+            self._restore_budget(day)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("warm boot: state restore failed: %s", exc)
+
+    def _restore_states(self, day: date) -> None:
+        # The *latest* decision per symbol wins: a name that went BOARD -> ARMED
+        # -> ABORT must not be restored into ARMED just because it was armed once.
+        rows = self.store.query(
+            "SELECT symbol, new_state, cycle_ts FROM decisions d "
+            "WHERE trading_day=? AND id = ("
+            "  SELECT MAX(id) FROM decisions x "
+            "  WHERE x.trading_day=d.trading_day AND x.symbol=d.symbol) "
+            "AND new_state IN ('BOARD','ARMED')", (day.isoformat(),))
+        for r in rows:
+            st = self.sm._st(r["symbol"])
+            st.state = State(r["new_state"])
+            st.last_seen = as_utc(datetime.fromisoformat(
+                str(r["cycle_ts"]).replace("Z", "+00:00")))
+            if st.state == State.ARMED:
+                # The armed level is not persisted; a restored ARMED name simply
+                # re-arms (level + fresh confirmation) on the next qualifying cycle.
+                st.confirm_bars = 0
+
+    def _restore_budget(self, day: date) -> None:
+        rows = self.store.alerts_for_day(day, kind="IGNITION")
+        b = self.sm.budget
+        for r in rows:
+            sym = r["symbol"]
+            slot = r["budget_slot"] or ""
+            b.ignited_symbols.add(sym)
+            b.spent.append({"symbol": sym, "slot": slot, "score": r["score"],
+                            "at": r["cycle_ts"]})
+            if slot == "RESERVE":
+                b.reserve_spent += 1
+            b.last_ignition_at = as_utc(
+                datetime.fromisoformat(str(r["cycle_ts"]).replace("Z", "+00:00")))
 
     # -- fetch (the only network in a cycle) --------------------------------
     def _fetch_universe(self, mode: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -118,14 +224,17 @@ class Runtime:
                       mode: str = "") -> dict[str, list[PricePoint]]:
         """Fresher quotes for tracked symbols, if a feed is available.
 
-        Preferred: one keyless TradingView batch POST covers the whole pool
-        (no free-tier throttling), regular session only, and every price is kept
-        only while it stays within ``TRADINGVIEW_MAX_DEVIATION_PCT`` of the
-        reconciled Finviz price — an unverified feed must not enter the decision
-        path on its own. Fallback: the paced, cached TwelveData quote. Any
-        throttle/429/cooldown falls back silently to the Finviz price.
+        1. One keyless TradingView batch POST covers the whole pool (no
+           free-tier throttling), regular session only, and every price is kept
+           only while it stays within ``TRADINGVIEW_MAX_DEVIATION_PCT`` of the
+           reconciled Finviz price — an unverified feed must not enter the
+           decision path on its own.
+        2. Alpaca batched quotes give a real bid/ask (the spread the Finviz
+           export does not carry) for up to 40 symbols in one round trip.
+        3. Finnhub quote as the last-resort freshness price, paced by its own
+           client rate limit (one fresh call per cycle).
+        Any throttle/429/cooldown falls back silently to the Finviz price.
         """
-        td = self.clients.get("twelvedata")
         tv = self.clients.get("tradingview")
         ref = reference or {}
         out: dict[str, list[PricePoint]] = {}
@@ -136,7 +245,7 @@ class Runtime:
         if tv is not None and self.cfg.bool("TRADINGVIEW_ENABLED", True):
             try:
                 batch = tv.fetch_batch_metrics(pool)
-            except Exception as exc:  # noqa: BLE001 - fail soft to TwelveData
+            except Exception as exc:  # noqa: BLE001 - fail soft to Alpaca/Finnhub
                 log.debug("tradingview batch unavailable: %s", exc)
                 batch = {}
             if batch:
@@ -156,17 +265,35 @@ class Runtime:
                         out[sym] = [PricePoint(source="tradingview", price=px, ts=now,
                                                scope="UNKNOWN", volume=m.get("volume"))]
                 if out:
-                    return out  # one batch covers the pool; skip TwelveData
+                    return out  # one batch covers the pool
 
-        if td is None or not self.cfg.raw("TWELVEDATA_KEY"):
+        al = self.clients.get("alpaca")
+        if al is not None and self.cfg.raw("ALPACA_KEY") and mode in ("OPEN", "MIDDAY"):
+            try:
+                quotes = al.latest_quotes(pool)
+            except Exception as exc:  # noqa: BLE001 - BLOCKED key fails soft
+                log.debug("alpaca quotes unavailable: %s", exc)
+                quotes = {}
+            for sym, q in quotes.items():
+                bid, ask = q.get("bid"), q.get("ask")
+                if not bid or not ask:
+                    continue
+                out[sym] = [PricePoint(source="alpaca", price=(bid + ask) / 2.0,
+                                       ts=q.get("ts") or now, scope="SINGLE_VENUE",
+                                       bid=bid, ask=ask)]
+            if out:
+                return out
+
+        fh = self.clients.get("finnhub")
+        if fh is None or not self.cfg.raw("FINNHUB_KEY"):
             return out
         start = self._fresh_cursor % len(pool)
         ordered = pool[start:] + pool[:start]
         self._fresh_cursor += 1
         for sym in ordered:
-            before = td.api_calls
+            before = fh.api_calls
             try:
-                q = td.quote(sym)  # cache hit is free; a fresh fetch is paced
+                q = fh.quote(sym)  # cache hit is free; a fresh fetch is paced
             except SourceError as exc:
                 msg = str(exc)
                 if "throttled" in msg or "429" in msg or "cooldown" in msg:
@@ -174,15 +301,44 @@ class Runtime:
                 continue  # a missing quote for one symbol is fine
             except Exception:  # noqa: BLE001
                 continue
-            out[sym] = [PricePoint(source="twelvedata", price=q.get("price"),
+            if not q.get("price"):
+                continue
+            out[sym] = [PricePoint(source="finnhub", price=q.get("price"),
                                    ts=q.get("ts") or now,
-                                   scope="UNKNOWN", volume=q.get("volume"),
+                                   scope="CONSOLIDATED", volume=q.get("volume"),
                                    prev_close=q.get("prev_close"))]
             # One fresh (uncached) fetch per cycle is enough to respect the budget.
-            if td.api_calls > before:
+            if fh.api_calls > before:
                 break
         return out
 
+
+    # -- batched quotes (item 9) --------------------------------------------
+    def _apply_quotes(self, snap: Snapshot, tracked: list[str], now: datetime) -> None:
+        """Fill bid/ask/spread for the tracked pool from one Alpaca batch call.
+
+        Finviz has no book, so ``spread_pct`` (and therefore G-SPREAD and the
+        spread penalty) has been MISSING. One ``/v2/stocks/quotes/latest`` call
+        covers up to 40 symbols. Fail soft: a blocked/rejected key leaves the
+        records exactly as reconciled.
+        """
+        al = self.clients.get("alpaca")
+        if al is None or not self.cfg.raw("ALPACA_KEY"):
+            return
+        try:
+            quotes = al.latest_quotes(tracked)
+        except Exception as exc:  # noqa: BLE001 - optional feed, never a cycle error
+            log.debug("alpaca quotes unavailable: %s", exc)
+            return
+        for sym, q in quotes.items():
+            rec = snap.records.get(sym)
+            bid, ask = q.get("bid"), q.get("ask")
+            if rec is None or not bid or not ask or ask < bid:
+                continue
+            rec.bid, rec.ask = bid, ask
+            mid = (bid + ask) / 2.0
+            if mid > 0:
+                rec.spread_pct = (ask - bid) / mid * 100.0
 
     # -- short-term volume velocity (Upgrade 1) --------------------------------
     @staticmethod
@@ -191,31 +347,71 @@ class Runtime:
         if not dq:
             return None
         cutoff = now - timedelta(seconds=seconds)
-        base: Optional[tuple[datetime, float]] = None
-        for ts, vol in dq:  # deque is ordered oldest->newest
+        base: Optional[float] = None
+        for sample in dq:  # deque is ordered oldest->newest; (ts, cumulative volume[, price])
+            ts, vol = sample[0], sample[1]
             if ts <= cutoff:
-                base = (ts, vol)
+                base = vol
             else:
                 break
         if base is None:
             return None  # no sample old enough yet
         cur = dq[-1][1]
-        return max(0.0, cur - base[1])
+        return max(0.0, cur - base)
 
     def _update_vol_history(self, snap: Snapshot, now: datetime) -> None:
-        """Roll per-symbol cumulative volume and derive 3m/10m deltas into history."""
+        """Roll per-symbol cumulative volume and derive 3m/10m deltas + session VWAP.
+
+        Samples are ``(ts, cumulative_volume, price)``; the deltas feed the hard
+        live-volume gate and the rolling session VWAP feeds ``vwap_dist`` and the
+        ABORT-below-VWAP check. Both are per-session facts rebuilt from this deque,
+        never from whole-day aggregates.
+        """
         for sym, rec in snap.records.items():
             if rec.volume is None:
                 continue
             dq = self._vol_history.setdefault(sym, deque(maxlen=60))
-            dq.append((now, rec.volume))
+            dq.append((now, rec.volume, rec.price))
             hist = self._history.setdefault(sym, {})
             vol_3m = self._delta_volume(dq, now, 180.0)
             vol_10m = self._delta_volume(dq, now, 600.0)
             if vol_3m is not None:
                 hist["vol_3m"] = vol_3m
+                rec.vol_3m = vol_3m
             if vol_10m is not None and rec.price:
                 hist["dollar_volume_10m"] = vol_10m * rec.price
+                rec.dollar_volume_10m = vol_10m * rec.price
+            vwap = self._rolling_vwap(dq)
+            if vwap is not None:
+                hist["vwap"] = vwap
+                rec.vwap = vwap
+
+    @staticmethod
+    def _rolling_vwap(dq: deque) -> Optional[float]:
+        """Session VWAP from cumulative-volume deltas (None until 2 samples)."""
+        pv = 0.0
+        vol = 0.0
+        prev_vol: Optional[float] = None
+        for sample in dq:
+            if len(sample) < 3 or sample[2] is None:
+                continue
+            _, cum, price = sample
+            if prev_vol is not None:
+                dv = cum - prev_vol
+                if dv > 0:
+                    pv += dv * price
+                    vol += dv
+            prev_vol = cum
+        return (pv / vol) if vol > 0 else None
+
+    def _live_volume(self, syms) -> dict[str, dict[str, Optional[float]]]:
+        """Per-symbol live tape for the hard volume gate."""
+        out: dict[str, dict[str, Optional[float]]] = {}
+        for sym in syms:
+            h = self._history.get(sym) or {}
+            out[sym] = {"vol_3m": h.get("vol_3m"),
+                        "dvol_10m": h.get("dollar_volume_10m")}
+        return out
 
 
     # -- the cycle ----------------------------------------------------------
@@ -238,6 +434,7 @@ class Runtime:
         snap.quality["half_day"] = _is_half(mode, day)
         self._universe = set(snap.records)
         self._data_grades.append(snap.data_grade)
+        self._apply_quotes(snap, tracked, now)
 
         # Short-term volume velocity (Upgrade 1): roll the cumulative volume per
         # symbol and derive 3m/10m deltas so the scorer can reward a stock that is
@@ -273,14 +470,21 @@ class Runtime:
         # Persist candidates only after scoring/ranking so the DB reflects the
         # actual score and rank for passed candidates. Gated-out candidates remain
         # recorded with NULL score/rank and their first failing gate reason.
+        # Item 6: full gate/feature JSON only for the top ``CAND_JSON_TOP_N`` names;
+        # everything else stores a compact reason, because per-tick JSON for 3,000
+        # symbols is what grew the DB to 93 GB.
+        top_n = self.cfg.int("CAND_JSON_TOP_N", 50)
         for sym, rep in gates_by.items():
-            fs = features_by[sym]
             sc = scored_by.get(sym)
+            ranked = sc is not None and sc.rank is not None and sc.rank <= top_n
+            keep_full = bool(rep.passed or ranked)
             self.store.save_candidate(
                 day, mode, now, sym,
                 round(sc.score, 2) if sc else None,
                 sc.rank if sc else None,
-                rep.passed, rep.as_dict(), fs.as_dict(),
+                rep.passed,
+                rep.as_dict() if keep_full else _compact_gates(rep),
+                features_by[sym].as_dict() if keep_full else {},
                 "" if rep.passed else (rep.first_failure.reason if rep.first_failure else ""))
 
         # methodology_v3 audit (§10): off the decision path, never gates an alert.
@@ -290,8 +494,9 @@ class Runtime:
         # state machine
         prices = {s: snap.records[s].price for s in snap.records
                   if snap.records[s].price is not None}
+        live = self._live_volume(snap.records)
         transitions = self.sm.step(rk, snap.records, mode, now=now, prices=prices,
-                                   data_grade=snap.data_grade)
+                                   data_grade=snap.data_grade, live=live)
 
         sent = self._dispatch(day, mode, now, rk, snap, transitions)
 
@@ -303,10 +508,21 @@ class Runtime:
         # its checkpoints (+30% before -12%) resolve as the day unfolds.
         self._observe_trackers(snap, now)
 
-        # persist snapshot + decisions
+        # persist snapshot + decisions. The snapshot carries the tracked pool's
+        # cumulative volumes and prices so a restart can rehydrate the rolling
+        # volume history (item 7); the pool is bounded, so this stays small.
+        snap.quality["volumes"] = {sym: rec.volume for sym, rec in snap.records.items()
+                                   if sym in self._vol_history and rec.volume is not None}
+        snap.quality["prices"] = {sym: rec.price for sym, rec in snap.records.items()
+                                  if sym in self._vol_history and rec.price is not None}
         self.store.save_snapshot(day, mode, now, snap.data_grade, snap.quality,
                                  snap.payload_hash, len(snap.records))
+        # Item 6: log only transitions that carry information (a state change or a
+        # BOARD/ARMED/IGNITION row); per-symbol per-tick holds are what bloated the DB.
+        keep = (State.BOARD, State.ARMED, State.IGNITION)
         for t in transitions:
+            if t.prev_state == t.new_state and t.new_state not in keep:
+                continue
             self.store.log_decision(day, mode, now, t.symbol, t.prev_state.value,
                                     t.new_state.value, t.reason, t.detail)
         # update history for the next cycle
@@ -315,9 +531,38 @@ class Runtime:
             if rec and rec.price is not None:
                 self._history.setdefault(s.symbol, {})["prev_price"] = rec.price
                 self._first_seen.setdefault(s.symbol, now)
+        self._evict_stale(now)
 
         return CycleResult(snapshot=snap, ranking=rk, transitions=transitions,
                            gate_failures=gate_failures, sent=sent, audit=audit)
+
+    # -- bounded memory (item 10) -------------------------------------------
+    def _evict_stale(self, now: datetime) -> None:
+        """Drop per-symbol state for names unseen in the active universe > MEMORY_TTL_S.
+
+        The universe is ~3,000 names; without eviction the feature/volume/catalyst
+        dictionaries grow for the life of the daemon.
+        """
+        ttl = self.cfg.float("MEMORY_TTL_S", 7200)
+        if ttl <= 0:
+            return
+        cutoff = now - timedelta(seconds=ttl)
+        tracked = set(self._history) | set(self._vol_history) | set(self._catalyst_items)
+        for sym in tracked:
+            if sym in self._universe:
+                continue
+            last = self._last_touch.get(sym)
+            # A symbol never seen in the universe has no touch record: its history
+            # came from warm boot and is bounded by the restore window, so keep it
+            # until the TTL measured from boot.
+            if last is not None and last < cutoff:
+                self._history.pop(sym, None)
+                self._vol_history.pop(sym, None)
+                self._catalyst_items.pop(sym, None)
+                self._first_seen.pop(sym, None)
+                self._last_touch.pop(sym, None)
+        for sym in self._universe:
+            self._last_touch[sym] = now
 
     def _catalyst_score(self, symbol: str) -> Optional[float]:
         if not self.catalyst:
@@ -329,6 +574,10 @@ class Runtime:
         if not self.catalyst.configured():
             return None
         items = getattr(self, "_catalyst_items", {}).get(symbol, [])
+        # No fresh news/filing inside AI_CAUSE_WINDOW_H: nothing to audit, so the
+        # catalyst component is MISSING (None) and the other four scale to 0..100.
+        if not items:
+            return None
         return self.catalyst.best_score(symbol, items)
 
     def _fetch_catalyst_items(self, symbols: list[str], now: datetime) -> None:
@@ -341,28 +590,62 @@ class Runtime:
         no items — the auditor sees an empty bundle, never a crash.
         """
         fv = self.clients.get("finviz")
-        if fv is None:
+        sec = self.clients.get("sec")
+        if fv is None and sec is None:
             return
         window_h = self.cfg.float("AI_CAUSE_WINDOW_H", 4)
         for sym in symbols:
             if sym in self._catalyst_items:
                 continue  # already fetched this trading day
             items: list[dict[str, Any]] = []
-            try:
-                for row in fv.news(sym):
-                    item = self._news_item(row, now, window_h)
-                    if item:
-                        items.append(item)
-            except Exception as exc:  # noqa: BLE001 - a feed miss is not a crash
-                log.debug("catalyst news fetch failed for %s: %s", sym, exc)
-            try:
-                for row in fv.latest_filings(sym):
-                    item = self._filing_item(row, now, window_h)
-                    if item:
-                        items.append(item)
-            except Exception as exc:  # noqa: BLE001
-                log.debug("catalyst filings fetch failed for %s: %s", sym, exc)
+            if fv is not None:
+                try:
+                    for row in fv.news(sym):
+                        item = self._news_item(row, now, window_h)
+                        if item:
+                            items.append(item)
+                except Exception as exc:  # noqa: BLE001 - a feed miss is not a crash
+                    log.debug("catalyst news fetch failed for %s: %s", sym, exc)
+                try:
+                    for row in fv.latest_filings(sym):
+                        item = self._filing_item(row, now, window_h)
+                        if item:
+                            items.append(item)
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("catalyst filings fetch failed for %s: %s", sym, exc)
+            # SEC EDGAR as the filings fallback: Finviz's latest-filings export is
+            # often empty for micro caps, and a missing 8-K is a missing catalyst.
+            if not any(i.get("kind") == "filing" for i in items):
+                items += self._sec_filings(sec, sym, now, window_h)
             self._catalyst_items[sym] = items
+
+    def _sec_filings(self, sec, sym: str, now: datetime,
+                     window_h: float) -> list[dict[str, Any]]:
+        """Recent EDGAR filings for one symbol (CIK map cached once per process)."""
+        if sec is None:
+            return []
+        try:
+            if self._sec_tickers is None:
+                self._sec_tickers = sec.company_tickers()
+            cik = (self._sec_tickers.get(sym.upper()) or {}).get("cik")
+            if not cik:
+                return []
+            rows = sec.submissions(int(cik)).get("filings") or []
+        except Exception as exc:  # noqa: BLE001 - SEC is a best-effort fallback
+            log.debug("sec filings fetch failed for %s: %s", sym, exc)
+            return []
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            form = (row.get("form") or "").strip()
+            age_min = _row_age_min(row.get("updated"), now)
+            if age_min is None or age_min > window_h * 60.0:
+                continue
+            out.append({"kind": "filing", "id": (row.get("link") or form).strip(),
+                        "form": form, "date": (row.get("updated") or "")[:10],
+                        "items": None, "summary": (row.get("title") or "").strip()})
+            if len(out) >= 5:
+                break
+        return out
 
     @staticmethod
     def _news_item(row: dict[str, Any], now: datetime, window_h: float) -> Optional[dict[str, Any]]:
@@ -443,7 +726,7 @@ class Runtime:
             price=rec.price, pct_vs_close=rec.change_pct,
             rise_15m_pct=None, volx_15m=fs.value("rvol"),
             dollar_vol_15m=fs.value("dollar_volume_15m"), day_volume=rec.volume,
-            rotation_ratio=None, vwap_state=vwap_state,
+            rotation_ratio=fs.value("float_rotation"), vwap_state=vwap_state,
             bid=rec.bid, ask=rec.ask, spread_pct=rec.spread_pct,
             float_shares=rec.shares_float, short_pct_float=rec.short_float,
             fuel_rating=_rating(fs.value("squeeze_flag"), rec.short_float),

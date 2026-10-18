@@ -19,17 +19,16 @@ its data is inconsistent. ROTD fixes that structurally:
 - **Code counts, model reads** — all numbers, scores and ranks come from code.
   The language model only classifies news and filings, asynchronously, and can
   never raise a score above the rules-only verdict.
-- **Daily self-measurement** — a MISS REPORT explains, for every sub-$10 runner
-  the day produced, exactly why ROTD did or did not flag it, and how early.
+- **Daily self-measurement** — a MISS REPORT explains, for every runner the day
+  produced, exactly why ROTD did or did not flag it, and how early.
 
 ## Install
 
-Mirrors the `penny-early-warning` installer. Download the script and run it
-**directly** (don't pipe it into bash — it needs to read your answers from the
-terminal):
+Download the script and run it **directly** (don't pipe it into bash — it needs
+to read your answers from the terminal):
 
 ```bash
-wget -O install.sh https://raw.githubusercontent.com/Ace1337z/big-whale-penny-tracker/main/install.sh
+wget -O install.sh https://raw.githubusercontent.com/Ace1337z/Runner-of-the-Day/main/install.sh
 bash install.sh
 ```
 
@@ -50,40 +49,136 @@ Telegram itself** — from your configured chat, send:
 
 ```
 /setkey FINVIZ_TOKEN <token>      # the only key needed to produce candidates
-/setkey TWELVEDATA_KEY <key>      # fresh regular-session quote
 /setkey FINNHUB_KEY <key>         # quote + market status
 /setkey ALPHA_VANTAGE_KEY <key>   # global quote
-/setkey ALPACA_KEY <id>           # unblocks the bid/ask book -> re-arms G-SPREAD/G-EXIT
+/setkey ALPACA_KEY <id>           # unblocks the batched bid/ask book -> G-SPREAD/G-EXIT
 /setkey ALPACA_SECRET <secret>
+/setkey AI_BASE_URL <url>         # OpenAI-compatible endpoint for the catalyst auditor
+/setkey AI_KEY <key>
+/setkey AI_MODEL <model-id>
 ```
 
 > **⚠️ Set `FINVIZ_TOKEN` immediately after install.** It is the primary feed and
 > the **only** source of the micro-cap universe (market cap ≤ `MAX_MARKET_CAP`).
-> Until it is set, ROTD pulls nothing,
-> scans return **zero candidates**, and the data grade is **F** — that is expected,
-> not a bug. (`/keys` shows what is set; the `doctor` check flags
-> `source:finviz: FINVIZ_TOKEN is not set`.) Every other key is optional.
+> Until it is set, ROTD pulls nothing, scans return **zero candidates**, and the
+> data grade is **F** — that is expected, not a bug. (`/keys` shows what is set;
+> the `doctor` check flags `source:finviz: FINVIZ_TOKEN is not set`.) Every other
+> key is optional.
 
-`/setkey` writes only allowlisted keys to the config file (mode 600), refuses
-anything else, and ignores messages from any chat but the configured
+`/setkey` writes only those eight allowlisted keys to the config file (mode 600),
+refuses anything else, and ignores messages from any chat but the configured
 `TELEGRAM_CHAT_ID`. Without any key ROTD still runs in shadow mode and the daily
 MISS REPORT lists every gate that was `NOT_ENFORCED` for lack of a feed.
 
-**Non-interactive / headless** (CI, or to pre-seed keys):
+**Non-interactive / headless** (CI, or to pre-seed any key):
 ```bash
 ROTD_NONINTERACTIVE=1 TELEGRAM_TOKEN=... TELEGRAM_CHAT_ID=... \
+  FINVIZ_TOKEN=... AI_BASE_URL=... AI_KEY=... AI_MODEL=... \
   ROTD_INSTALL_DIR=/opt/rotd bash install.sh
 ```
-`ROTD_VERSION` (default `main`, or a tag) and `ROTD_URL` are also overridable.
+Every exported name that matches a setting in the registry is written to
+`config.env`; unknown names are ignored. `ROTD_VERSION` (default `main`, or a
+tag) and `ROTD_URL` are also overridable.
 
 **Manual install** (no script): `pip install -e .[dev]`, then
 `rotd setup` (prompts for Telegram) or `rotd setup --non-interactive`.
 Secrets are never read from the command line and are redacted from logs.
 
+## Updating an existing install
+
+`update.sh` upgrades a running `/opt/rotd` in place. **`config.env`, `rotd.db`
+and `logs/` are never touched** — only the code tree, the venv and the systemd
+unit are replaced.
+
+```bash
+cd /opt/rotd
+sudo bash update.sh            # latest main
+sudo bash update.sh v1.1.0     # or a tag
+```
+
+If the install lives elsewhere:
+```bash
+ROTD_INSTALL_DIR=/srv/rotd bash update.sh
+```
+
+What it does, in order:
+
+1. Backs up the **current code** to a fresh `mktemp -d` directory (the database
+   is deliberately excluded — a live `rotd.db` can be tens of GB and copying it
+   to `/tmp` would fill the disk).
+2. Downloads the tarball for `main` or the tag and stops the `rotd` service.
+3. Replaces `src/rotd` wholesale (so modules deleted upstream, such as the
+   removed TwelveData adapter, do not linger), then overlays the rest of the
+   tree. `config.env`, `rotd.db` and `logs/` stay as they are.
+4. Reinstalls dependencies into the existing venv (new dependencies are picked
+   up automatically).
+5. Re-renders and installs `deploy/rotd.service` (`@USER@`/`@INSTALL_DIR@`
+   substituted), then `systemctl daemon-reload`.
+6. Runs `rotd selftest` (offline, 53 checks) and `rotd doctor` (live sources,
+   model, calendar, disk).
+7. Restarts the service and prints the first 12 status lines.
+8. If `rotd.db` is larger than 5 GB, prints the one-time reclaim commands.
+
+**Rollback** — the code backup tarball path is printed at the end of the run:
+```bash
+sudo systemctl stop rotd
+sudo tar -C /opt/rotd -xf /tmp/tmp.XXXX/code.tar   # BACKUP path from the update output
+sudo systemctl start rotd
+```
+`config.env` and `rotd.db` were never modified, so no data rollback is needed.
+
+### What changed for an existing install
+
+Nothing in `config.env` has to be edited. Notes for upgrades from the previous
+release:
+
+- **`TWELVEDATA_KEY` is gone.** It is ignored if still present. Freshness quotes
+  now come from the keyless TradingView scanner, then Alpaca batched quotes,
+  then a paced Finnhub call. You can delete the line from `config.env`.
+- **`AI_BASE_URL` / `AI_KEY` / `AI_MODEL`** replace any `OPENAI_*` names you may
+  have exported by hand. `install.sh` no longer sets `OPENAI_*`.
+- **New settings default sanely**, so no action is required:
+  `MIN_VOL_3M_SHARES`, `MIN_DVOL_10M_REG/EXT`, `MAX_DRAWDOWN_FROM_HOD_PCT`,
+  `RAW_RETENTION_HOURS`, `CAND_RETENTION_HOURS`, `DB_PRUNE_INTERVAL_S`,
+  `CAND_JSON_TOP_N`, `MEMORY_TTL_S`, `VOL_HISTORY_RESTORE_MIN`,
+  `ALERT_BUDGET_MIN/MAX`. `rotd config KEY` prints any of them.
+- **The database migrates itself** on first start (WAL, indexes, retention
+  window, `auto_vacuum`). No manual SQL.
+
+### Reclaiming a bloated database (one time)
+
+The previous release kept every raw payload, every per-cycle candidate row and a
+full snapshot per cycle, and grew the DB to tens of GB in two days. Retention now
+prunes raw payloads after 24h, non-board candidates/decisions after 48h, and
+snapshots after 24h, and runs at startup and then hourly.
+
+Deleting rows does **not** shrink the file on a legacy DB: `auto_vacuum` only
+takes effect on a new file or after a full `VACUUM`, and a full `VACUUM` needs
+about twice the file size free. Pick one:
+
+```bash
+# A. Enough free disk (>= ~2.2x the file size):
+sudo systemctl stop rotd
+sqlite3 /opt/rotd/rotd.db 'VACUUM'
+sudo systemctl start rotd
+
+# B. Not enough free disk: start a fresh DB. History is lost; the runner list,
+#    MISS REPORT and shadow clock for previous days are gone with it.
+sudo systemctl stop rotd
+sudo mv /opt/rotd/rotd.db /opt/rotd/rotd.db.old
+sudo systemctl start rotd          # creates a compact DB with auto_vacuum on
+sudo rm /opt/rotd/rotd.db.old      # after you are satisfied
+```
+
+`rotd doctor` reports the DB path and disk headroom; `update.sh` prints the
+commands above whenever it finds a file over 5 GB.
+
 ## Status
 
 Built and running in shadow. At most `ALERT_BUDGET_PER_DAY` (5, +1 reserve)
 ignition alerts per trading day; zero alerts on a quiet day is a correct outcome.
+The budget is adjustable live with `/setbudget N` (1–10) and resettable with
+`/resetbudget`.
 
 **Shadow mode is the default gate.** ROTD must run for a full **10-trading-day
 shadow clock** before a single live push is allowed. The clock counts actual NYSE
@@ -124,33 +219,103 @@ A cycle:
 2. **Reconcile** — `normalize.py` turns every raw row into one canonical record
    per symbol with a reason-coded price basis (`REGULAR` vs `EXTENDED`), a data
    grade (`A`–`F`), and staleness/conflict flags. Conflicting or stale quotes are
-   dropped, never averaged silently.
-3. **Features** — `features.py` derives the five scoring inputs (tape, momentum,
-   catalyst, gap, context) plus a 15-minute dollar-volume / acceleration history
-   fed in by the `tracker.py` PathTracker.
-4. **Gates** — `gates.py` runs hard, fail-closed gates before any scoring:
-   `G-DATA` (grade/stale/halt), `G-PHASE` (market state), `G-PRICE` (≤ $10, no
-   floor), `G-HALT`, `G-TRADES`. Three gates that need a feed this deployment
-   does not have — `G-SPREAD` (bid/ask book), `G-LIQ` (15-min bar feed),
-   `G-EXIT` (slippage estimate) — are **off by default** and report
-   `NOT_ENFORCED` (they re-arm if you add a book/bar feed; see `docs/VERIFIED.md`
-   G-18). A name that fails any enforced gate is not scored and cannot alert.
-5. **Score & rank** — `scoring.py` computes a 0–100 Stage-1 score from five
+   dropped, never averaged silently. `float_shares` is normalized to a single
+   unit (shares) at this boundary, so a millions-vs-shares feed cannot distort
+   FUEL.
+3. **Freshness** — `runtime._fresh_quotes` upgrades the tracked pool (board and
+   near-board) with, in order: one keyless TradingView batch POST, one Alpaca
+   batched quote call, one paced Finnhub quote. Every step fails soft to the
+   reconciled Finviz price.
+4. **Features** — `features.py` derives the five scoring inputs (tape, momentum,
+   catalyst, gap, context) plus rolling 3m/10m volume deltas, a rolling VWAP,
+   float rotation and drawdown-from-HOD, fed in by the in-memory tracker.
+5. **Gates** — `gates.py` runs hard, fail-closed gates before any scoring:
+   `G-DATA` (grade/stale/halt), `G-PHASE` (market state), `G-PRICE` (market cap /
+   legacy price ceiling, no floor), `G-HALT`, `G-TRADES`. Three gates that need a
+   feed this deployment does not have — `G-SPREAD` (bid/ask book), `G-LIQ`
+   (15-min bar feed), `G-EXIT` (slippage estimate) — are **off by default** and
+   report `NOT_ENFORCED` (they re-arm if you add a book/bar feed; see
+   `docs/VERIFIED.md` G-18). A name that fails any enforced gate is not scored
+   and cannot alert.
+6. **Score & rank** — `scoring.py` computes a 0–100 Stage-1 score from five
    weighted components, ranks candidates, and takes the `BOARD_SIZE` (5) top
-   names. Rank 1 becomes ROTD only if its score clears `ROTD_MIN_SCORE` (70).
+   names. Rank 1 becomes ROTD only if its score clears `ROTD_MIN_SCORE` (60).
    The score is deliberately uncalibrated — it is an ordering, not a probability.
-6. **State machine** — `state_machine.py` runs each board name through a ladder
+   Weights are renormalized over the components that actually have data, so a
+   missing optional input lowers confidence instead of silently capping the score.
+7. **State machine** — `state_machine.py` runs each board name through a ladder
    `WATCH → QUALIFIED → BOARD → ARMED → IGNITION`, spending the day's alert
    budget on the best-confirmed name. Transitions are reversible and every step
    stores a reason.
-7. **Catalyst** — `catalyst.py` runs the methodology_v3 auditor (`auditor.py`)
+8. **Catalyst** — `catalyst.py` runs the methodology_v3 auditor (`auditor.py`)
    against a news/filings bundle, asynchronously. The model classifies and
-   audits only; it can never exceed the rules-only verdict, and on timeout or no
-   model it fails closed to rules-only.
-8. **Explain & record** — `notifier.py` renders the board, ROTD pick, ignition,
+   audits only; it can never exceed the rules-only verdict, and on timeout, no
+   model, or malformed output it fails closed to rules-only.
+9. **Explain & record** — `notifier.py` renders the board, ROTD pick, ignition,
    and the daily MISS REPORT. Every score, gate and suppression carries reason
    codes. `store.py` persists snapshots, candidates, alerts, outcomes,
    runner lists and the MISS REPORT to SQLite so any day can be replayed.
+
+### The hard live-volume gate
+
+Whole-day volume is not evidence that a stock is moving *now*. A name that ran at
+09:35 and died can still carry a large daily total. Both the `BOARD → ARMED` and
+`ARMED → IGNITION` steps therefore require live tape:
+
+| Check | Setting | Default | Fails with |
+| --- | --- | --- | --- |
+| Shares traded in the last 3 minutes | `MIN_VOL_3M_SHARES` | 25,000 | `RECENT_VOL_TOO_LOW` |
+| 10-minute dollar volume, OPEN/MIDDAY | `MIN_DVOL_10M_REG` | $75,000 | `DVOL_10M_TOO_LOW` |
+| 10-minute dollar volume, PRE/POST | `MIN_DVOL_10M_EXT` | $25,000 | `DVOL_10M_TOO_LOW` |
+| No rolling history yet (warmup) | — | — | `NO_VOL_HISTORY` |
+
+The check **fails closed**: warmup (no history) is a failure, not a pass, so the
+first cycles after a restart cannot arm a name on unknown tape. Warm boot
+(see below) is what keeps that window short.
+
+### Warm boot
+
+A restart used to lose every in-memory rolling window, leaving the volume gate
+blind for its first three minutes and the board empty. On start, `runtime`
+rehydrates from today's snapshots:
+
+- rolling cumulative volume and price history for the last
+  `VOL_HISTORY_RESTORE_MIN` (15) minutes, from which 3m/10m deltas and the
+  rolling VWAP are recomputed exactly as a live cycle would;
+- the current `BOARD`/`ARMED` states from the latest decision per symbol;
+- the alert budget already spent today from `alerts`.
+
+Restored `ARMED` names restart their confirmation window (`confirm_bars = 0`);
+the armed *level* is not persisted, so a restart can never ignite a name on a
+price it has not re-confirmed.
+
+Snapshots store only the tracked pool's `quality_json["volumes"]` /
+`["prices"]`, not the whole universe, and are pruned after 24h.
+
+### Front-side only: rolling VWAP and drawdown from HOD
+
+ROTD buys strength, not fades. Two mechanisms enforce that:
+
+- **Rolling VWAP** (`ABORT_VWAP_MINUTES`, 5m) — a 5-minute close under the alert
+  VWAP aborts a live alert (`ABORT_VWAP`).
+- **Drawdown from HOD** (`MAX_DRAWDOWN_FROM_HOD_PCT`, 12%) — a price more than
+  12% below the day high blocks `ARMED → IGNITION` (`BACKSIDE_OF_HOD`) and
+  proportionally penalizes the STRUCTURE component, so a +80%-then-−35% chart
+  cannot rank on old strength.
+
+**Float rotation** (volume ÷ free float) feeds both TAPE and FUEL: a name that
+has turned over its float is real demand, not just a gap.
+
+### POST: the after-hours move, not the morning's
+
+In `POST`, the price line, TAPE and STRUCTURE use the **extended-hours change
+against today's 16:00 ET close** (`ah_change_pct`) when the feed supplies it, so
+a 10:00 AM regular-session spike cannot carry an after-hours alert. The alert
+prints both numbers:
+
+```
+Price $3.42 (+2.5% AH | +20.8% vs prev close)
+```
 
 ### Shadow clock (Phase 6)
 
@@ -187,20 +352,39 @@ flowchart TD
     A[rotd listen daemon] -->|every LISTEN_POLL_S| B{reload config if changed}
     B --> C[Decision cycle]
     C --> D[sources: Finviz universe + fresh quote]
-    D --> E[normalize: canonical records + data grade]
-    E --> F[gates G-DATA/G-PHASE/G-PRICE/G-HALT/G-TRADES]
-    F --> G[score + rank top 5 BOARD]
-    G --> H[state machine WATCH→QUALIFIED→BOARD→ARMED→IGNITION]
-    H --> I{SHADOW clock complete?}
-    I -- no --> J[log only, never push]
-    I -- yes --> K[push IGNITION/BOARD/ROTD to Telegram]
-    A -->|long-poll getUpdates| L[owner chat command]
-    L --> M[handle_command: /setkey /status /board /runners /miss /alerts /shadow /log /keys /doctor]
-    M --> N[reply via send]
-    K --> O[(SQLite: snapshots, candidates, alerts, outcomes, MISS REPORT)]
-    J --> O
-    O --> P[finalize → daily MISS REPORT]
+    D --> E[freshness: TradingView batch -> Alpaca batch -> Finnhub]
+    E --> F[normalize: canonical records + data grade]
+    F --> G[gates G-DATA/G-PHASE/G-PRICE/G-HALT/G-TRADES]
+    G --> H[score + rank top 5 BOARD]
+    H --> I[state machine WATCH->QUALIFIED->BOARD->ARMED->IGNITION]
+    I --> J{live volume + HOD + shadow clock OK?}
+    J -- no --> K[log only, never push]
+    J -- yes --> L[push IGNITION/BOARD/ROTD to Telegram]
+    A -->|long-poll getUpdates| M[owner chat command]
+    M --> N[handle_command: /setkey /setbudget /resetbudget /status /board /runners /miss /alerts /shadow /log /keys /doctor]
+    N --> O[reply via send]
+    L --> P[(SQLite: snapshots, candidates, alerts, outcomes, MISS REPORT)]
+    K --> P
+    P --> Q[finalize -> daily MISS REPORT]
 ```
+
+### Long-running service
+
+`deploy/rotd.service` runs `rotd listen` with:
+
+- `StartLimitIntervalSec=60` / `StartLimitBurst=3` in `[Unit]` (modern systemd
+  rejects these in `[Service]`) — a crash loop panics out after 3 restarts in
+  60s instead of restarting forever;
+- `Restart=always`, `RestartSec=5`;
+- `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=full`, `ProtectHome=read-only`
+  and `ReadWritePaths=@INSTALL_DIR@` — the process needs outbound HTTPS and its
+  own directory, nothing else.
+
+Memory is bounded in-process rather than by the unit: per-symbol dictionaries
+(feature history, volume history, catalyst items) are evicted after
+`MEMORY_TTL_S` (2h) out of the active universe, snapshots keep only the tracked
+pool, and candidate rows store full gate/feature JSON only for the top
+`CAND_JSON_TOP_N` (50) names.
 
 ### What an alert looks like
 
@@ -215,6 +399,7 @@ from model prose. Times show **ET** and **KL** (Asia/Kuala Lumpur) for the owner
 Score 84/100  (rank 1)
 Price $3.42  (+6.2% vs prev close)
 Spread 0.6%   Vol 8.4M   Dollar-vol $28.7M
+3m Vol 412K   10m Dollar-Vol $6.1M
 Float 42M   Short 12.0%
 
 Why now:
@@ -226,6 +411,12 @@ Why now:
 Flags: ARMED_OK, BOARD_HELD
 
 Risk: this is decision support, not advice; runners reverse hard.
+```
+
+In `POST` the price line and the tape line carry the extended-hours move:
+
+```
+Price $3.42  (+2.5% AH | +20.8% vs prev close)
 ```
 
 **BOARD** (silent, scheduled in `BOARD_SCHEDULE_ET`):
@@ -262,7 +453,7 @@ Caught:
   ✓ $ABCD lead 12m  max +9.4%
 Missed:
   ✗ $WXYZ +140% — no fresh quote (G-DATA=STALE)
-Quiet day: no sub-$10 names ran, and ROTD stayed silent. That is a correct outcome, not a failure.
+Quiet day: no names ran, and ROTD stayed silent. That is a correct outcome, not a failure.
 ```
 
 ### Telegram commands
@@ -273,12 +464,14 @@ installer writes it). Any other chat is ignored silently.
 | Command | What it does |
 | --- | --- |
 | `/start`, `/help` | Show the command menu |
-| `/setkey KEY VALUE` | Set an API key after install (allowlisted; secrets saved, not echoed) |
+| `/setkey KEY VALUE` | Set one of the 8 allowlisted keys after install (secrets saved, not echoed) |
+| `/setbudget N` | Set the daily IGNITION budget (1–10). Persisted and applied immediately, no restart |
+| `/resetbudget` | Clear today's spent IGNITION slots — deletes today's `IGNITION` rows and resets the in-memory budget to `0/N` |
 | `/keys` | Show which API keys are set vs missing |
 | `/status` | Now, session mode, shadow clock, alert budget used |
 | `/board` | The latest ranked board (top candidates) |
 | `/runners` | Today's runner list (big movers) |
-| `/miss` | Today's MISS REPORT (auto-built at session close; the honest "which sub-$10 names ran and why ROTD did/didn't flag them") |
+| `/miss` | Today's MISS REPORT (auto-built at session close; the honest "which names ran and why ROTD did/didn't flag them") |
 | `/alerts` | Today's ignition alerts |
 | `/shadow` | The 10-trading-day shadow clock |
 | `/log` | Recent event log |
@@ -291,6 +484,7 @@ candidates:
 /keys
 ```
 Changes apply on the next cycle (the `listen` loop reloads `config.env`).
+`/setbudget` and `/resetbudget` take effect on the running process immediately.
 
 ### Slash-command menu
 
@@ -323,19 +517,21 @@ purpose. Secrets (`secret=True`) are never displayed or logged.
 
 ### Config file & keys
 - Location: `$HOME/.rotd/rotd.env` (owner-only, mode 600 on POSIX / ACL on Windows),
-  gitignored. Override with `ROTD_CONFIG` or `--config`.
-- At install only `TELEGRAM_TOKEN` + `TELEGRAM_CHAT_ID` are set. Add the rest
-  later from Telegram via `/setkey KEY VALUE` (allowlisted keys only).
+  gitignored. Override with `ROTD_CONFIG` or `--config`. The installer sets
+  `ROTD_HOME=/opt/rotd` and puts the config, DB and logs there.
+- At install only `TELEGRAM_TOKEN` + `TELEGRAM_CHAT_ID` are asked for. Add the
+  rest later from Telegram via `/setkey KEY VALUE` (8 allowlisted keys), or
+  pre-seed them through the environment in non-interactive mode.
 - Secrets never travel on the command line and are scrubbed from logs.
 
 | Setting | Default | Unit | Meaning |
 |---|---|---|---|
+| `ROTD_HOME` | (empty) | path | Install home; anchors the DB, config and logs. |
 | `FINVIZ_TOKEN` ★ | (empty) | — | Finviz Elite token — the only key required to run. |
 | `FINVIZ_BASE` | `https://elite.finviz.com` | url | Finviz base URL. |
-| `TWELVEDATA_KEY` ★ | (empty) | — | TwelveData key (regular-session 1-min bars + quote). |
 | `FINNHUB_KEY` ★ | (empty) | — | Finnhub key (quote + market status). |
 | `ALPHA_VANTAGE_KEY` ★ | (empty) | — | Alpha Vantage key (global quote). |
-| `ALPACA_KEY` ★ / `ALPACA_SECRET` ★ | (empty) | — | Alpaca key id / secret — unblocks the bid/ask book. |
+| `ALPACA_KEY` ★ / `ALPACA_SECRET` ★ | (empty) | — | Alpaca key id / secret — unblocks the batched bid/ask book. |
 | `ALPACA_FEED` | `iex` | feed | Alpaca data feed (iex = single venue). |
 | `SEC_USER_AGENT` | `ROTD research` | text | SEC EDGAR requires a descriptive User-Agent. |
 | `AI_BASE_URL` | (empty) | url | OpenAI-compatible base URL for the catalyst auditor. |
@@ -369,10 +565,18 @@ purpose. Secrets (`secret=True`) are never displayed or logged.
 | `SEC_SHARES_MAX_AGE_D` | `14` | days | Shares older than this can't bound float. |
 | `REVERSE_SPLIT_RECENT_D` | `90` | days | A recent reverse split flags REVERSE_SPLIT_RECENT. |
 
+### Live-volume gate & front-side structure
+| Setting | Default | Unit | Meaning |
+|---|---|---|---|
+| `MIN_VOL_3M_SHARES` | `25000` | shares | Minimum shares traded in the last 3 minutes (rolling in-memory delta). Blocks ARMED/IGNITION on dead tape; warmup also fails closed. |
+| `MIN_DVOL_10M_REG` | `75000` | USD | Minimum 10-minute rolling dollar volume in OPEN/MIDDAY. |
+| `MIN_DVOL_10M_EXT` | `25000` | USD | Minimum 10-minute rolling dollar volume in PRE/POST. |
+| `MAX_DRAWDOWN_FROM_HOD_PCT` | `12.0` | % | Block ARMED→IGNITION when price is more than this below the day high. |
+
 ### Gates (fail-closed; run before scoring)
 | Gate | Enforced? | Needs | Default setting |
 |---|---|---|---|
-| `G-PRICE` | ✅ always | `MAX_PRICE` | sub-$10, no floor |
+| `G-PRICE` | ✅ always | `MAX_MARKET_CAP` / `MAX_PRICE` | market cap ceiling, no price floor |
 | `G-PHASE` | ✅ always | mode profile | OVERNIGHT never ignites |
 | `G-DATA` | ✅ always | fresh, conflict-free grade | drops stale/suspended/conflicting |
 | `G-HALT` | ✅ always | quote presence | no halt feed ⇒ defers to G-DATA (`HALT_UNKNOWN`) |
@@ -383,7 +587,8 @@ purpose. Secrets (`secret=True`) are never displayed or logged.
 
 OFF-by-default gates re-arm the moment a feed supplies their input (e.g. set
 `USE_SPREAD_GATE=1` / `USE_EXIT_GATE=1` once Alpaca keys are live). A name that
-fails **any enforced** gate is not scored and cannot alert.
+fails **any enforced** gate is not scored and cannot alert. The live-volume gate
+is not one of these: it is always enforced in the state machine.
 
 | Gate param | Default | Unit | Meaning |
 |---|---|---|---|
@@ -406,11 +611,15 @@ fails **any enforced** gate is not scored and cannot alert.
 | `W_STRUCTURE` | `15` | points | Structure weight. |
 | `W_CONTEXT` | `10` | points | Context weight. |
 
+Components with no data are excluded from the weighted average and the remaining
+weights are renormalized (active-weight scaling); a missing optional input cannot
+silently cap the score.
+
 ### Ranking, board & state machine (hysteresis)
 | Setting | Default | Unit | Meaning |
 |---|---|---|---|
 | `BOARD_SIZE` | `5` | names | BOARD = top 5 qualified candidates. |
-| `ROTD_MIN_SCORE` | `70` | points | Rank 1 is only ROTD if score ≥ this. |
+| `ROTD_MIN_SCORE` | `60` | points | Rank 1 is only ROTD if score ≥ this. |
 | `QUALIFY_CONSEC` | `2` | cycles | Consecutive fully-gated cycles to reach QUALIFIED. |
 | `BOARD_MIN_DWELL_S` | `60` | s | Must stay top-5 this long to hold BOARD. |
 | `BOARD_EXIT_RANK` | `8` | rank | Leaves BOARD only below this rank. |
@@ -426,19 +635,27 @@ reversible and every step stores a reason.
 
 **Fail-closed arming.** ARMED means "top name *right now*". While a name waits for
 its confirmation bars, rank (`≤ ARM_MAX_RANK`) and score (`≥ ARM_MIN_SCORE`) are
-re-checked every cycle. If either slips — it loses the top rank to a competitor, or
-its score falls during confirmation — it steps back down (to `BOARD`, or
-`QUALIFIED` if it also left the board) and its confirmation counter resets, so it
-cannot ignite on stale strength. Re-arming starts the confirmation window over.
+re-checked every cycle, and so is live volume and drawdown-from-HOD. If any of
+them slips — it loses the top rank to a competitor, its score falls during
+confirmation, its tape dies, or it fades off the high — it steps back down (to
+`BOARD`, or `QUALIFIED` if it also left the board) and its confirmation counter
+resets, so it cannot ignite on stale strength. Re-arming starts the confirmation
+window over.
 
 ### Alert budget (scarcity)
 | Setting | Default | Unit | Meaning |
 |---|---|---|---|
 | `ALERT_BUDGET_PER_DAY` | `5` | pushes | Max IGNITION pushes per trading day. Change live via `/setbudget N`. |
+| `ALERT_BUDGET_MIN` / `ALERT_BUDGET_MAX` | `1` / `10` | pushes | Accepted range for `/setbudget` (0 would silence the day; 10 caps a typo). |
 | `RESERVE_SLOTS` | `1` | pushes | Reserve pushes beyond budget for exceptional names. |
 | `EXCEPTIONAL_SCORE` | `90` | points | A reserve candidate must score at least this. |
 | `ALERT_MIN_GAP_MIN` | `15` | minutes | Minimum spacing between pushes. |
 | `BOARD_SCHEDULE_ET` | `16:30,19:30,04:30,07:30,09:00,09:35` | HH:MM ET | Silent scheduled BOARD messages. |
+
+The budget is also restored after a restart from today's `alerts` rows, so a
+crash cannot hand out extra slots. `/resetbudget` deletes today's `IGNITION`
+alerts and resets the in-memory counter — use it deliberately, it is a manual
+override of the scarcity rule.
 
 ### Abort / risk control
 | Setting | Default | Unit | Meaning |
@@ -473,12 +690,42 @@ cannot ignite on stale strength. Re-arming starts the confirmation window over.
 | `DILUTION_BAND_MEDIUM` | `35` | score | dilution_score ≥ this ⇒ band MEDIUM. |
 | `PROMO_AMPLIFY_PCT` | `0` | % | Reserved; 0 = disabled. |
 
-### Retention & ops
+**Prompt handling.** Some OpenAI-compatible gateways silently drop a
+`role: "system"` message. ROTD therefore merges the system prompt into the first
+user turn for both the auditor and the news classifier, which works on gateways
+that honour system messages and on ones that drop them. Responses are parsed
+from either a normal JSON body or an SSE stream, because some gateways stream
+chunks even when `"stream": false` is requested.
+
+**Cap vocabulary.** The prompt (§7.2) names 23 cap codes and the parser accepts
+all of them; a test pins the prompt's codes to the parser's set so the two cannot
+drift. Where the prompt and the code disagree on a maximum
+(`FUEL_WEAK`, `NO_IGNITION`, `PHASE_INELIGIBLE`, `NO_STRUCTURE`), the code's
+`ARMED` is kept so live verdicts do not change.
+
+**Model notes.** `elf/deepseek-v4.1-flash` is preferred: the unprefixed
+`deepseek-v4.1-flash` occasionally emits invalid enums, which degrades the
+verdict to rules-only. `rotd doctor` shows the model actually in use; a
+rules-only deployment prints `~ catalyst: no model configured`.
+
+### Retention, database & ops
 | Setting | Default | Unit | Meaning |
 |---|---|---|---|
-| `RAW_RETENTION_DAYS` | `7` | days | Prune raw_payloads / non-qualified per-cycle data. |
+| `RAW_RETENTION_HOURS` | `24` | hours | Delete raw payloads older than this (keeps recent replay/debugging). |
+| `CAND_RETENTION_HOURS` | `48` | hours | Delete non-board candidates/decisions older than this; board/armed/ignition rows are kept. |
+| `RAW_RETENTION_DAYS` | `7` | days | Hard prune of `raw_payloads` and stale `candidates`. |
+| `DB_PRUNE_INTERVAL_S` | `3600` | s | Run retention + incremental vacuum this often (and once at startup). |
+| `CAND_JSON_TOP_N` | `50` | rank | Keep full gate/feature JSON only for this many top names; other rows store compact reasons. |
+| `MEMORY_TTL_S` | `7200` | s | Evict per-symbol in-memory dictionaries after this long out of the active universe. |
+| `VOL_HISTORY_RESTORE_MIN` | `15` | minutes | On restart, rehydrate the rolling volume history from this recent window. |
 | `DISK_WARN_PCT` | `10` | % | Warn once when free disk falls under this. |
 | `QUIET_HOURS` | (empty) | HH:MM-HH:MM,mode | Optional per-mode quiet hours (none by default). |
+
+The DB runs in **WAL** with `synchronous=NORMAL`, `auto_vacuum=INCREMENTAL`,
+`journal_size_limit=64 MB`, and indexes shaped for the panel queries the UI
+issues. Retention runs off the decision path (startup + hourly). A legacy DB
+only gains `auto_vacuum` after a full `VACUUM` or a fresh file — see
+[Reclaiming a bloated database](#reclaiming-a-bloated-database-one-time).
 
 ### Runtime & shadow clock
 | Setting | Default | Unit | Meaning |
@@ -486,10 +733,23 @@ cannot ignite on stale strength. Re-arming starts the confirmation window over.
 | `SHADOW` | `0` | bool | 1 = decide and log but never push (`rotd shadow`). |
 | `SHADOW_DAYS_REQUIRED` | `10` | trading_days | Shadow-clock length before live pushes allowed. |
 | `SHADOW_AUTOSTART` | `0` | bool | 1 = start the clock on the first shadow cycle. |
+| `SHADOW_RUN_WHEN_CLOSED` | `1` | bool | 1 = keep running cycles outside NYSE sessions (off-thread, so commands stay responsive). |
 | `SELFTEST` | `0` | bool | 1 = fully offline deterministic mode. |
 | `UNIVERSE_POLL_S` | `30` | s | Universe sweep cadence (mode profile overrides). |
 | `MOVERS_POLL_S` | `20` | s | Mover-screen cadence (mode profile overrides). |
+| `LISTEN_POLL_S` | `5` | s | `rotd listen` loop cadence: one cycle + one command poll. |
+| `TELEGRAM_POLL_TIMEOUT_S` | `20` | s | Long-poll timeout for `getUpdates`. |
 | `WATCHDOG_STALL_S` | `180` | s | A cycle longer than this trips the watchdog. |
+
+### Source caching & rate limits
+| Setting | Default | Unit | Meaning |
+|---|---|---|---|
+| `QUOTE_CACHE_TTL_S` | `60` | s | Reuse a successful per-symbol quote within this window. |
+| `SOURCE_COOLDOWN_S` | `60` | s | After an HTTP 429 a source rests this long before its next call. |
+| `TRADINGVIEW_ENABLED` | `1` | bool | Keyless batch freshness scanner; falls back to Alpaca/Finnhub when off. |
+| `TRADINGVIEW_TIMEOUT_S` | `10` | s | HTTP timeout for one batch scanner POST. |
+| `TRADINGVIEW_CACHE_TTL_S` | `10` | s | Reuse one batch result for this window (at most one POST per cycle). |
+| `TRADINGVIEW_MAX_DEVIATION_PCT` | `20` | % | Drop a scanner price this far off the reconciled Finviz price. |
 
 ### Per-mode profile (cadence & ignition policy)
 | Mode | `POLL_S` | `ALLOW_IGNITION` |
@@ -517,20 +777,38 @@ cannot ignite on stale strength. Re-arming starts the confirmation window over.
 ROTD owns a fresh, forked source layer in `src/rotd/sources/` (no dependency on
 the `penny` package, and `penny-early-warning` is never edited). Current
 adapters: **Finviz** (universe, movers, quote rows, news, filings, extended-hours
-price), **TwelveData** (regular-session 1-min bars + quote), **TradingView
-scanner** (keyless batch freshness quote — see below), **Finnhub** (quote +
-market status), **Alpha Vantage** (global quote), **Yahoo** (chart), **SEC EDGAR**
+price), **TradingView scanner** (keyless batch freshness quote), **Alpaca**
+(batched bid/ask quotes, optional candle fallback), **Finnhub** (quote + market
+status), **Alpha Vantage** (global quote), **Yahoo** (chart), **SEC EDGAR**
 (Atom), **FINRA** (RegSHO + consolidated short interest). Telegram delivery uses
 `FakeTelegram` by default; live sends are wired but require a bot token.
 
-### Keyless batch freshness (TradingView scanner)
+There is no TwelveData adapter. It was removed because its free tier allowed
+~8 credits/min, which throttled on an active day and made freshness unreliable.
+The replacement chain is described below.
 
-The TwelveData free tier allows ~8 credits/min, so polling fresh quotes per cycle
-throttles on an active day. `sources/tradingview.py` issues **one keyless POST** to
-`scanner.tradingview.com/america/scan` per cycle that returns price/change/volume
-for the whole tracked pool, with the paced TwelveData quote kept as a fallback.
+### Freshness chain
 
-Guard rails (this feed is treated as an unverified hint, not a decision input):
+Each cycle upgrades the tracked pool (board + near-board) in this order, and
+stops at the first source that answers:
+
+1. **TradingView scanner** — one keyless POST returns price/volume for the whole
+   pool. Regular session only (`OPEN`/`MIDDAY`); extended-hours truth stays with
+   Finviz. A scanner price more than `TRADINGVIEW_MAX_DEVIATION_PCT` (20%) off the
+   reconciled Finviz price is dropped, so an unverified feed cannot enter the
+   decision path on its own.
+2. **Alpaca batched quotes** — one `latest_quotes` call covers up to 40 symbols
+   and supplies the real bid/ask the Finviz export does not carry. The freshness
+   price is the bid/ask midpoint; `bid`, `ask` and `spread_pct` are filled on the
+   record, which is what re-arms `G-SPREAD`/`G-EXIT`. A blocked key fails soft.
+3. **Finnhub quote** — last resort, paced by the client's own rate limiter (one
+   fresh call per cycle, rotating across the pool).
+
+Any HTTP error, 429 or cooldown falls back silently to the reconciled Finviz
+price. `rotd doctor` reports each source's state (`OK`, `!! not set`, `BLOCKED`).
+
+Guard rails on the scanner (it is treated as an unverified hint, not a decision
+input):
 
 - **Verification is PENDING.** Capture the raw response with
   `python probes/probe_sources.py tradingview`; the column mapping is only trusted
@@ -540,22 +818,26 @@ Guard rails (this feed is treated as an unverified hint, not a decision input):
   would be a 15-minute print feed (VERIFIED G-18 — still not in the decision path)
   and `float_shares_outstanding` is not a verified mapping; Finviz owns float
   (G-17). These fields are deliberately not requested.
-- **Regular session only** (`OPEN`/`MIDDAY`). Extended-hours truth stays with
-  Finviz, the only verified extended-hours source.
-- **Deviation cap.** A scanner price more than `TRADINGVIEW_MAX_DEVIATION_PCT`
-  (default 20%) off the reconciled Finviz price is dropped; conflicts never enter
-  the snapshot. Any HTTP/parse failure falls back to TwelveData, then to the
-  Finviz price.
+- **Deviation cap** as above.
 
-Disable with `TRADINGVIEW_ENABLED=0`. It never re-arms G-18 gates: no bid/ask book
-appears anywhere, so `G-SPREAD`/`G-LIQ`/`G-EXIT` remain `NOT_ENFORCED`.
+Disable with `TRADINGVIEW_ENABLED=0`. It never re-arms G-18 gates by itself: no
+bid/ask book appears without Alpaca, so `G-SPREAD`/`G-LIQ`/`G-EXIT` stay
+`NOT_ENFORCED`.
 
 ## Testing & verification
 
-- `rotd selftest` — ~50 offline deterministic self-checks across fixtures,
-  reconciliation, gates, scoring, determinism, the shadow clock and the tracker
-  (run with `rotd -v selftest` for the checklist). No network.
-- `pytest tests/` — unit tests with the network blocked.
+- `rotd selftest` — **53** offline deterministic self-checks across fixtures,
+  reconciliation, gates (including the live-volume gate failing closed), scoring,
+  determinism, the shadow clock, warm boot and the tracker (run with
+  `rotd -v selftest` for the checklist). No network.
+- `pytest tests/` — **92** unit tests with the network blocked.
+  `tests/test_permanent_upgrades.py` pins the ten permanent upgrades:
+  the live-volume gate, POST AH handling, auditor SSE/system-merge parsing, the
+  Telegram budget commands, retention, warm boot, VWAP/rotation/drawdown, Alpaca
+  batching, the cap-vocabulary drift check, the prompt-in-user-turn fix, and the
+  non-interactive installer pre-seed.
+- `rotd doctor` — live checks: config, every source, calendar, shadow clock,
+  auditor prompt, model, disk headroom.
 - `probes/` — live fact-finding scripts used to verify each source; their
   findings are recorded in `docs/VERIFIED.md`, not guessed.
 

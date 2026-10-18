@@ -65,6 +65,13 @@ F_DATA = "DATA_QUALITY_LOW"
 F_SUSPENDED = R_SUSPENDED
 F_CONFLICT = R_CONFLICT
 
+# Hard live-volume gate reasons (section 2). Fail closed: whole-day volume or a
+# strong structure score can never substitute for tape trading RIGHT NOW.
+R_NO_VOL_HISTORY = "NO_VOL_HISTORY"
+R_RECENT_VOL_TOO_LOW = "RECENT_VOL_TOO_LOW"
+R_DVOL_10M_TOO_LOW = "DVOL_10M_TOO_LOW"
+R_BACKSIDE_OF_HOD = "BACKSIDE_OF_HOD"
+
 
 @dataclass
 class GateResult:
@@ -171,7 +178,7 @@ def gate_spread(rec: Canonical, cfg: Config, mode: str) -> GateResult:
 
 
 def gate_liquidity(fs: FeatureSet, cfg: Config, mode: str) -> GateResult:
-    # VERIFIED G-18: 15-min dollar volume needs a 1-min bar feed (TwelveData
+    # VERIFIED G-18: 15-min dollar volume needs a 1-min bar feed (Alpaca
     # prepost is 403 here), which this deployment does not have. When off the
     # gate is NOT_ENFORCED (passes) and the MISS REPORT lists it. Enable
     # USE_LIQ_GATE once a bar feed supplies dollar_volume_15m.
@@ -252,8 +259,42 @@ def gate_data(rec: Canonical, cfg: Config) -> GateResult:
     return GateResult("G-DATA", True, P_OK, f"grade {rec.data_grade}")
 
 
+def live_volume_reason(vol_3m: Optional[float], dvol_10m: Optional[float],
+                       cfg: Config, mode: str) -> Optional[str]:
+    """The hard live-volume reason code, or None when the tape is alive.
+
+    Fail closed on warmup (``vol_3m is None``) and on dead tape. One helper is
+    used by both the BOARD->ARMED and ARMED->IGNITION checks so the two can never
+    disagree about what "alive" means.
+    """
+    if vol_3m is None:
+        return R_NO_VOL_HISTORY
+    if vol_3m <= 0 or vol_3m < cfg.float("MIN_VOL_3M_SHARES", 25000):
+        return R_RECENT_VOL_TOO_LOW
+    if dvol_10m is not None:
+        key = "MIN_DVOL_10M_EXT" if mode in ("PRE", "POST", "OVERNIGHT") else "MIN_DVOL_10M_REG"
+        floor = cfg.float(key, 25000 if key.endswith("EXT") else 75000)
+        if dvol_10m < floor:
+            return R_DVOL_10M_TOO_LOW
+    return None
+
+
+def backside_of_hod(price: Optional[float], day_high: Optional[float],
+                    cfg: Config) -> bool:
+    """True when price has faded more than ``MAX_DRAWDOWN_FROM_HOD_PCT`` off HOD."""
+    if not price or not day_high:
+        return False
+    max_dd = cfg.float("MAX_DRAWDOWN_FROM_HOD_PCT", 12.0)
+    return max_dd > 0 and price < day_high * (1.0 - max_dd / 100.0)
+
+
 def gates_not_enforced(cfg: Config) -> list[str]:
-    """Gate names currently OFF by default (no feed supplies their input).\n\n    Surfaced in the MISS REPORT so the daily post-mortem honestly lists the\n    system's blind spots (VERIFIED G-18). When a book/15m feed is added, set\n    the matching ``USE_*_GATE`` flag and the gate stops appearing here.\n    """
+    """Gate names currently OFF by default (no feed supplies their input).
+
+    Surfaced in the MISS REPORT so the daily post-mortem honestly lists the
+    system's blind spots (VERIFIED G-18). When a book/15m feed is added, set
+    the matching ``USE_*_GATE`` flag and the gate stops appearing here.
+    """
     out = []
     if not cfg.bool("USE_SPREAD_GATE"):
         out.append("G-SPREAD (needs a bid/ask book)")

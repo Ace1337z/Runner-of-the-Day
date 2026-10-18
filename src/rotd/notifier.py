@@ -33,6 +33,15 @@ def _when(dt: Optional[datetime]) -> str:
     return f"{to_et(dt):%Y-%m-%d %H:%M:%S} ET / {to_kl(dt):%H:%M} KL"
 
 
+def _price_line(rec: Any, mode: str) -> str:
+    """Price line. POST shows the extended-hours move against today's 16:00 close."""
+    ah = getattr(rec, "ah_change_pct", None)
+    if mode == "POST" and ah is not None:
+        return (f"Price ${price_str(rec.price)} "
+                f"({pct(ah)} AH | {pct(rec.change_pct)} vs prev close)")
+    return f"Price ${price_str(rec.price)} ({pct(rec.change_pct)} vs prev close)"
+
+
 def render_ignition(symbol: str, scored: Scored, rec: Any, slot: str, mode: str,
                     reasons: list[str], now: Optional[datetime] = None) -> str:
     """The ignition alert. One screen: what, why-now, the numbers, the risk."""
@@ -43,11 +52,18 @@ def render_ignition(symbol: str, scored: Scored, rec: Any, slot: str, mode: str,
         f"Score {scored.score:.0f}/100  (rank {scored.rank or '-'})",
     ]
     if rec is not None:
-        lines += [
-            f"Price {price_str(rec.price)}  ({pct(rec.change_pct)} vs prev close)",
+        lines.append(_price_line(rec, mode))
+        lines.append(
             f"Spread {num(rec.spread_pct)}%   Vol {compact(rec.volume)}   "
-            f"Dollar-vol {money(rec.dollar_volume)}",
-        ]
+            f"Dollar-vol {money(rec.dollar_volume)}")
+        # The tape that actually fired the alert, next to the whole-day totals.
+        tape: list[str] = []
+        if getattr(rec, "vol_3m", None) is not None:
+            tape.append(f"3m Vol {compact(rec.vol_3m)}")
+        if getattr(rec, "dollar_volume_10m", None) is not None:
+            tape.append(f"10m Dollar-Vol {money(rec.dollar_volume_10m)}")
+        if tape:
+            lines.append("   ".join(tape))
         if rec.shares_float:
             lines.append(f"Float {compact(rec.shares_float)}   "
                          f"Short {num(rec.short_float)}%")

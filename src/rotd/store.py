@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import sqlite3
 import threading
 from datetime import date, datetime, timedelta, timezone
@@ -73,6 +74,8 @@ CREATE TABLE IF NOT EXISTS candidates (
 CREATE INDEX IF NOT EXISTS idx_cand_day_sym ON candidates(trading_day, symbol);
 -- Panel query shape (/board, /status): latest cycle for a day, then rank order.
 CREATE INDEX IF NOT EXISTS idx_cand_day_ts_rank ON candidates(trading_day, cycle_ts DESC, rank);
+-- Score-ordered lookups (top-N panel, candidate JSON retention).
+CREATE INDEX IF NOT EXISTS idx_cand_ts_score ON candidates(trading_day, cycle_ts DESC, score DESC);
 
 CREATE TABLE IF NOT EXISTS decisions (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -199,14 +202,47 @@ class Store:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
+        # Freed pages go back to the file in small chunks instead of a full
+        # VACUUM: the live DB is far too large to rewrite (needs ~2x free space).
+        self._conn.execute("PRAGMA auto_vacuum=INCREMENTAL")
+        self._conn.execute("PRAGMA journal_size_limit=67108864")
         self._conn.executescript(SCHEMA)
         self._conn.execute("INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)",
                            (str(SCHEMA_VERSION),))
         self._conn.commit()
+        self._maybe_enable_incremental_vacuum()
+        # Snapshots are only needed for the in-process warm boot window (item 7);
+        # every row is a full per-source quality blob.
+        self.execute("DELETE FROM snapshots WHERE cycle_ts < ?",
+                     ((now_utc() - timedelta(hours=24)).isoformat(),))
 
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+    def _maybe_enable_incremental_vacuum(self) -> None:
+        """Turn on ``auto_vacuum=INCREMENTAL`` for a legacy DB, safely.
+
+        The pragma only takes effect on a new file or after a full ``VACUUM``.
+        A full VACUUM needs ~2x the DB size in free space; on the 93 GB live file
+        that is impossible, so it is skipped (deletes still reclaim space via
+        ``incremental_vacuum`` after a fresh file is created by the operator).
+        """
+        try:
+            mode = self.query_one("PRAGMA auto_vacuum")
+            if mode is not None and int(mode[0]) == 2:
+                return
+            size = self.path.stat().st_size if self.path.exists() else 0
+            free = shutil.disk_usage(str(self.path.parent)).free
+            if size == 0 or size * 2.2 < free:
+                self._conn.execute("VACUUM")
+                self._conn.commit()
+            else:
+                log.warning("store: auto_vacuum not enabled (db %d bytes, free %d); "
+                            "incremental_vacuum will be a no-op until a fresh DB exists",
+                            size, free)
+        except Exception as exc:  # noqa: BLE001 - maintenance must never block startup
+            log.warning("store: could not check auto_vacuum: %s", exc)
 
     # -- low-level ----------------------------------------------------------
     def execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
@@ -296,6 +332,12 @@ class Store:
                              (trading_day.isoformat(), kind))
         return int(row["n"]) if row else 0
 
+    def reset_budget(self, trading_day: date, kind: str = "IGNITION") -> int:
+        """Clear today's spent slots (Telegram ``/resetbudget``). Returns rows removed."""
+        cur = self.execute("DELETE FROM alerts WHERE trading_day=? AND kind=?",
+                           (trading_day.isoformat(), kind))
+        return cur.rowcount
+
     # -- outcomes -----------------------------------------------------------
     def save_outcome(self, alert_id: int, symbol: str, trading_day: date,
                      checkpoint: str, ts: datetime, price: Optional[float],
@@ -375,8 +417,9 @@ class Store:
     def prune(self, raw_retention_days: int, today: Optional[date] = None) -> dict[str, int]:
         """Delete raw payloads and per-cycle candidate rows past retention.
 
-        Only ``raw_payloads`` and ``candidates`` are pruned. ``snapshots``,
-        ``decisions``, ``alerts``, ``outcomes`` and ``runner_list`` are the
+        Only ``raw_payloads`` and ``candidates`` are pruned here; ``maintain``
+        also trims the hot tables (24h raw, 48h non-board candidates/decisions).
+        ``snapshots``, ``alerts``, ``outcomes`` and ``runner_list`` are the
         grading/MISS-REPORT record and are kept (they are compact).
         """
         cutoff = ((today or now_utc().date()) - timedelta(days=raw_retention_days)).isoformat()
@@ -384,6 +427,44 @@ class Store:
         for table in ("raw_payloads", "candidates"):
             cur = self.execute(f"DELETE FROM {table} WHERE trading_day < ?", (cutoff,))
             removed[table] = cur.rowcount
+        return removed
+
+    def maintain(self, cfg: Any, today: Optional[date] = None) -> dict[str, int]:
+        """Hourly/startup retention + space reclaim (item 6).
+
+        Deletes raw payloads older than ``RAW_RETENTION_HOURS`` and non-board
+        candidates/decisions older than ``CAND_RETENTION_HOURS``, then returns
+        freed pages to the OS in small chunks. Runs off the decision path.
+        """
+        day = today or now_utc().date()
+        raw_h = cfg.int("RAW_RETENTION_HOURS", 24)
+        cand_h = cfg.int("CAND_RETENTION_HOURS", 48)
+        removed: dict[str, int] = {}
+        raw_cut = (now_utc() - timedelta(hours=raw_h)).isoformat()
+        cand_cut = (now_utc() - timedelta(hours=cand_h)).isoformat()
+        removed["raw_payloads"] = self.execute(
+            "DELETE FROM raw_payloads WHERE cycle_ts < ?", (raw_cut,)).rowcount
+        removed["candidates"] = self.execute(
+            "DELETE FROM candidates WHERE cycle_ts < ? AND (rank IS NULL OR rank > ?)",
+            (cand_cut, cfg.int("CAND_JSON_TOP_N", 50))).rowcount
+        removed["decisions"] = self.execute(
+            "DELETE FROM decisions WHERE cycle_ts < ? "
+            "AND new_state NOT IN ('BOARD','ARMED','IGNITION') "
+            "AND prev_state NOT IN ('BOARD','ARMED','IGNITION')", (cand_cut,)).rowcount
+        # Snapshots are only needed for the in-process warm-boot window; each row
+        # carries the tracked pool's quality blob.
+        removed["snapshots"] = self.execute(
+            "DELETE FROM snapshots WHERE cycle_ts < ?", (raw_cut,)).rowcount
+        removed.update(self.prune(cfg.int("RAW_RETENTION_DAYS", 7), day))
+        try:
+            self._conn.execute("PRAGMA incremental_vacuum(2000)")
+            self._conn.commit()
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self._conn.commit()
+        except sqlite3.Error as exc:
+            log.warning("store: vacuum/checkpoint failed: %s", exc)
+        if any(removed.values()):
+            log.info("store: maintain removed %s", removed)
         return removed
 
     # -- meta ---------------------------------------------------------------

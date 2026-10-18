@@ -60,7 +60,6 @@ All live in `src/penny/sources/`. They share plumbing from `base.py`:
 | Module | `name` | Constructor | Public methods (signature) | Transport |
 |---|---|---|---|---|
 | `finviz.py` | `finviz` | `(cfg, secrets=None)` | `fetch(link, *, ttl=0.0, **params) -> str`; `fetch_csv(link, *, ttl=0.0, **params) -> list[dict]`; `screener(...)`; `universe(ttl=300.0)`; `movers(session=None, top_n=200, ...)`; `snapshot(symbols, session=None, ...)`; `normalize_row(row, session) -> dict|None`; `verify(ticker)`; `stock_history(ticker, period="d")`; `groups(group="sector", view="152")`; `latest_filings(ticker)`; `news(view="1")`; `ticker_news(ticker, ttl=300.0)`; `insiders(ticker, tc="7")`; `economic_calendar(date_from)`; `health()` | REST/CSV, token via `FINVIZ_TOKEN` |
-| `twelvedata.py` | `twelvedata` | `(cfg, secrets=None)` | `quote(symbol) -> dict|None`; `bars(symbol, interval="1min", outputsize=300, ...)`; `configured()`; `health()` | REST JSON, key via `TWELVEDATA_KEY` |
 | `alpaca.py` | `alpaca` | `(cfg, secrets=None)` | `bars(symbol, start: datetime, end: datetime, ...)`; `news(symbols, hours=72, limit=50)`; `configured()`; `health()` | REST JSON, `ALPACA_KEY`/`ALPACA_SECRET`, feed `ALPACA_FEED=iex` |
 | `finnhub.py` | `finnhub` | `(cfg, secrets=None)` | `company_news(symbol, days=3)`; `configured()`; `health()` | REST JSON, `FINNHUB_KEY` |
 | `sec.py` | `sec` | `(cfg, secrets=None)` | `cik_for(ticker)`; `filings(ticker, days=5) -> list[dict]`; `filing_text(filing, limit=40000)`; `health()` | EDGAR JSON/text, `SEC_USER_AGENT` |
@@ -79,7 +78,7 @@ Per the build prompt §5.1 and DATA-01/04 notes:
 | Need | Reused adapter | Wrap as |
 |---|---|---|
 | Universe, movers, quote rows, news, filings | `finviz.FinvizClient` | `rotd.sources.finviz_feed` |
-| Fresh price/volume/1-minute candles | `twelvedata.TwelveDataClient` | `rotd.sources.twelvedata_feed` |
+| Fresh price/volume | `tradingview` scanner (batch) / `alpaca` quotes (bid/ask) / `finnhub` quote | `rotd.sources.tradingview` |
 | Candle fallback | `alpaca`, `finnhub` | `rotd.sources.alpaca_feed`, `rotd.sources.finnhub_feed` |
 | Filings text | `sec.SecClient` | `rotd.sources.edgar_feed` |
 | Short data | `finra.FinraClient` | `rotd.sources.finra_feed` |
@@ -250,7 +249,7 @@ big-whale-penny-tracker/
     sources/                  # owned fork of the penny adapters + new ones
       __init__.py
       base.py                 # SourceError, RateLimiter, TTLCache, parse_csv, BaseClient
-      finviz.py twelvedata.py alpaca.py finnhub.py sec.py finra.py yahoo.py
+      finviz.py tradingview.py alpaca.py finnhub.py sec.py finra.py yahoo.py
       halt_feed.py            # new, if VERIFY confirms a free/paid halt feed
       fixtures/               # saved raw responses (golden fixtures)
     ingest.py                 # raw payload capture with fetch time

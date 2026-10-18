@@ -3,7 +3,7 @@
 Verified (docs/VERIFIED.md G-13/G-14): ``v8/finance/chart`` works and carries
 ``hasPrePostMarketData: true`` and ``exchangeTimezoneName``; ``v7/finance/quote``
 is **401** (deprecated). Used only as a last-resort fallback in the candle chain
-(TwelveData -> Yahoo -> Alpaca).
+(Alpaca -> Yahoo).
 """
 
 from __future__ import annotations

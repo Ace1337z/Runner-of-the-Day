@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -76,24 +77,51 @@ RUBRIC_VALUES = ("PASS", "FAIL", "UNKNOWN", "NA")
 # The mechanical caps of §7.2, worst first. The model may only *add* caps; code
 # computes these too and takes the minimum verdict (A4 "strongest hardening").
 CAP_ORDER = (
-    "GATE_BLOCKED", "DATA_INCOMPLETE", "ACTIVE_DILUTION", "SUPPLY_HEAVY",
-    "CAUSE_MISSING", "DOCUMENT_PRESENTS_RISK", "PROMOTIONAL",
-    "FUEL_WEAK", "NO_IGNITION", "PHASE_INELIGIBLE", "NO_DISTRIBUTION",
-    "NO_STRUCTURE",
+    "GATE_BLOCKED", "DATA_INCOMPLETE", "INSUFFICIENT_DATA", "ACTIVE_DILUTION",
+    "DISTRIBUTION", "NO_DISTRIBUTION", "BLOWOFF_OR_PARABOLIC",
+    "DOCUMENT_PRESENTS_RISK", "HALTED", "SUPPLY_HEAVY", "CAUSE_MISSING",
+    "NO_CAUSE_NO_MECHANISM", "PROMOTIONAL", "FUEL_WEAK", "NO_IGNITION",
+    "PHASE_INELIGIBLE", "EXHAUSTION_SIGNS", "SYMPATHY_LEADER_WEAK",
+    "NO_STRUCTURE", "UNCREDITED_CAUSE_TAPE_ONLY", "SUPPLY_OVERHANG",
+    "SUPPLY_UNKNOWN", "NEWS_UNAVAILABLE", "HALT_RECENT", "SYMPATHY_ONLY",
+    "REVERSAL_MODE", "FORMER_SUPERNOVA_CATALYST", "RISK_OFF_SOFT_CAUSE",
 )
+# Every code in prompt §7.2 must be here, or the model's report is rejected as
+# "unknown cap" and the audit silently degrades to rules-only. The five names
+# the code computes itself (DATA_INCOMPLETE, CAUSE_MISSING, PROMOTIONAL,
+# NO_DISTRIBUTION, DOCUMENT_PRESENTS_RISK) stay as accepted aliases. Where the
+# prompt and the code disagree on a maximum (FUEL_WEAK, NO_IGNITION,
+# PHASE_INELIGIBLE, NO_STRUCTURE: prompt NO_TRADE, code ARMED) the code value
+# wins so live verdicts do not change.
 CAP_MAX_VERDICT = {
     "GATE_BLOCKED": "REJECT",
     "DATA_INCOMPLETE": "NO_TRADE",
+    "INSUFFICIENT_DATA": "NO_TRADE",
     "ACTIVE_DILUTION": "REJECT",
+    "DISTRIBUTION": "REJECT",
+    "NO_DISTRIBUTION": "ARMED",
+    "BLOWOFF_OR_PARABOLIC": "REJECT",
+    "DOCUMENT_PRESENTS_RISK": "REJECT",
+    "HALTED": "NO_TRADE",
     "SUPPLY_HEAVY": "NO_TRADE",
     "CAUSE_MISSING": "NO_TRADE",
-    "DOCUMENT_PRESENTS_RISK": "REJECT",
+    "NO_CAUSE_NO_MECHANISM": "NO_TRADE",
     "PROMOTIONAL": "NO_TRADE",
     "FUEL_WEAK": "ARMED",
     "NO_IGNITION": "ARMED",
     "PHASE_INELIGIBLE": "ARMED",
-    "NO_DISTRIBUTION": "ARMED",
+    "EXHAUSTION_SIGNS": "NO_TRADE",
+    "SYMPATHY_LEADER_WEAK": "NO_TRADE",
     "NO_STRUCTURE": "ARMED",
+    "UNCREDITED_CAUSE_TAPE_ONLY": "ARMED",
+    "SUPPLY_OVERHANG": "ARMED",
+    "SUPPLY_UNKNOWN": "ARMED",
+    "NEWS_UNAVAILABLE": "ARMED",
+    "HALT_RECENT": "ARMED",
+    "SYMPATHY_ONLY": "ARMED",
+    "REVERSAL_MODE": "ARMED",
+    "FORMER_SUPERNOVA_CATALYST": "ARMED",
+    "RISK_OFF_SOFT_CAUSE": "ARMED",
 }
 
 
@@ -156,6 +184,14 @@ END_MARK = "END SYSTEM PROMPT"
 def prompt_path(cfg: Config) -> Path:
     name = cfg.str("AI_PROMPT_FILE", "methodology_v3.md") or "methodology_v3.md"
     return Path(__file__).resolve().parent / "prompts" / name
+
+
+def prompt_cap_codes(cfg: Optional[Config] = None) -> list[str]:
+    """Cap codes named in prompt §7.2 (``- CODE:`` lines), for drift checks."""
+    import re
+    text = prompt_path(cfg or Config()).read_text(encoding="utf-8")
+    body = text.split("## 7.2 Cap table", 1)[-1].split("## 7.3", 1)[0]
+    return re.findall(r"^- ([A-Z_]+):", body, re.M)
 
 
 def load_system_prompt(cfg: Config) -> str:
@@ -650,10 +686,10 @@ class AuditorService:
 
 
 def _parse_json_object(text: str) -> Optional[dict[str, Any]]:
-    """Strict JSON object; tolerate a leading/trailing fence only (H9)."""
+    """Strict JSON object; tolerate reasoning blocks and a fence only (H9)."""
     if not text:
         return None
-    s = text.strip()
+    s = strip_reasoning(text).strip()
     if s.startswith("```"):
         s = s.split("```", 2)[1] if s.count("```") >= 2 else s.strip("`")
         if s.lstrip().lower().startswith("json"):
@@ -672,6 +708,56 @@ def _parse_json_object(text: str) -> Optional[dict[str, Any]]:
     return obj if isinstance(obj, dict) else None
 
 
+_THINK_RE = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
+
+
+def strip_reasoning(text: str) -> str:
+    """Drop ``<think>...</think>`` blocks that reasoning models emit before the JSON."""
+    if not text:
+        return ""
+    return _THINK_RE.sub("", text).strip()
+
+
+def model_text(body: str, content_type: str = "") -> str:
+    """Extract the assistant text from a chat-completions response body.
+
+    The configured gateway streams SSE chunks even when ``"stream": false`` is
+    requested, so both shapes must be handled: a JSON body
+    (``choices[0].message.content``) or an SSE stream where the text is the
+    concatenation of ``choices[0].delta.content``. ``delta.reasoning`` and
+    ``reasoning_details`` are never the answer and are ignored.
+    """
+    raw = body or ""
+    if raw.lstrip().startswith("data:") or "text/event-stream" in (content_type or ""):
+        parts: list[str] = []
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if not payload or payload == "[DONE]":
+                continue
+            try:
+                obj = json.loads(payload)
+            except ValueError:
+                continue
+            for ch in obj.get("choices") or []:
+                piece = ((ch.get("delta") or {}).get("content")
+                         or (ch.get("message") or {}).get("content"))
+                if piece:
+                    parts.append(piece)
+        return strip_reasoning("".join(parts))
+    try:
+        obj = json.loads(raw)
+    except ValueError:
+        return strip_reasoning(raw)
+    try:
+        content = obj["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        return strip_reasoning(raw)
+    return strip_reasoning(content or "")
+
+
 def http_caller(cfg: Config, system: str, user: str) -> str:
     """OpenAI-compatible chat call (§10 A6: temperature 0, JSON mode)."""
     import requests  # local import: no network import in unit tests
@@ -682,15 +768,18 @@ def http_caller(cfg: Config, system: str, user: str) -> str:
         "model": cfg.str("AI_MODEL", "deepseek-v4.1-flash"),
         "temperature": cfg.float("AI_TEMPERATURE", 0.0),
         "max_tokens": cfg.int("AI_MAX_TOKENS", 1200),
+        "stream": False,
         "response_format": {"type": "json_object"},
-        "messages": [{"role": "system", "content": system},
-                     {"role": "user", "content": user}],
+        # Some OpenAI-compatible gateways silently drop role="system" (verified
+        # against elfgank.my.id, which answers as if the system turn never
+        # existed). Merging the system prompt into the user turn works on both
+        # those gateways and compliant ones.
+        "messages": [{"role": "user", "content": f"{system}\n\n---\n\n{user}"}],
     }
     resp = requests.post(url, json=body, timeout=cfg.float("CATALYST_TIMEOUT_S", 45),
                          headers={"Authorization": f"Bearer {cfg.raw('AI_KEY')}"})
     resp.raise_for_status()
-    data = resp.json()
-    return data["choices"][0]["message"]["content"]
+    return model_text(resp.text, resp.headers.get("Content-Type", ""))
 
 
 # --- calibration (A4.10) ---------------------------------------------------

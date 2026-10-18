@@ -74,8 +74,14 @@ def score_candidate(rec: Canonical, fs: FeatureSet, gates: GateReport, cfg: Conf
          ("TAPE", "CATALYST", "FUEL", "STRUCTURE", "CONTEXT")}
 
     # --- TAPE (0..1): how hard the tape is igniting right now ---
+    # POST: use the true after-hours move vs today's 16:00 ET regular close when
+    # the feed supplies it, so a 10:00 AM regular-session spike cannot carry an
+    # after-hours alert (section 3).
+    gain = fs.value("gain_from_prev_close")
+    if mode == "POST" and fs.value("ah_change_pct") is not None:
+        gain = fs.value("ah_change_pct")
     tape_parts = [
-        _lin(fs.value("gain_from_prev_close"), 3.0, 40.0),
+        _lin(gain, 3.0, 40.0),
         _lin(fs.value("gain_from_open"), 2.0, 25.0),
         _lin(fs.value("rvol"), 1.5, 10.0),
         _lin(fs.value("range_expansion"), 3.0, 25.0),
@@ -89,6 +95,10 @@ def score_candidate(rec: Canonical, fs: FeatureSet, gates: GateReport, cfg: Conf
     dvol10 = fs.value("dollar_volume_10m")
     if dvol10 is not None:
         tape_parts.append(_lin(dvol10, 100_000.0, 5_000_000.0))
+    # Float rotation: a name that has turned over its float is real demand.
+    rot = fs.value("float_rotation")
+    if rot is not None:
+        tape_parts.append(_lin(rot, 0.5, 5.0))
     present = [p for p in tape_parts if p is not None]
     tape = sum(present) / len(present) if present else None
 
@@ -110,6 +120,11 @@ def score_candidate(rec: Canonical, fs: FeatureSet, gates: GateReport, cfg: Conf
     sq = fs.value("squeeze_flag")
     if sq is not None:
         fuel_parts.append(sq)
+    # Float rotation (section 8): volume as a multiple of the free float. A name
+    # that has turned its float over has real demand behind it, not just a gap.
+    rot = fs.value("float_rotation")
+    if rot is not None:
+        fuel_parts.append(_lin(rot, 0.5, 3.0))
     fuel = sum(fuel_parts) / len(fuel_parts) if fuel_parts else None
 
     # --- STRUCTURE (0..1): a clean setup ---
@@ -118,12 +133,20 @@ def score_candidate(rec: Canonical, fs: FeatureSet, gates: GateReport, cfg: Conf
     if nh is not None:
         struct_parts.append(nh)
     gap = fs.value("gap_pct")
+    if mode == "POST" and fs.value("ah_change_pct") is not None:
+        gap = fs.value("ah_change_pct")
     if gap is not None:
         struct_parts.append(_lin(gap, 0.0, 15.0))
     d52l = fs.value("dist_from_52w_low")
     if d52l is not None:
         # Being nearer the 52w low is a better risk/reward for a fresh runner.
         struct_parts.append(clamp(1.0 - d52l / 100.0, 0.0, 1.0))
+    # Front-side only: fading off HOD is penalized in proportion to the drawdown
+    # (section 8), so a +80%-then-35%-off-high chart cannot rank on old strength.
+    dd = fs.value("drawdown_from_hod_pct")
+    if dd is not None:
+        max_dd = cfg.float("MAX_DRAWDOWN_FROM_HOD_PCT", 12.0)
+        struct_parts.append(clamp(1.0 - dd / max_dd, 0.0, 1.0) if max_dd > 0 else 0.0)
     structure = sum(struct_parts) / len(struct_parts) if struct_parts else None
 
     # --- CONTEXT (0..1): session and data quality ---

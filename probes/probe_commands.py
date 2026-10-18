@@ -26,7 +26,7 @@ def main() -> int:
         "TELEGRAM_CHAT_ID=285995945\n"
         "SHADOW=1\n"
         "ALERT_BUDGET_PER_DAY=3\n"
-        "FINVIZ_TOKEN=\nTWELVEDATA_KEY=\n",
+        "FINVIZ_TOKEN=\nFINNHUB_KEY=\n",
         encoding="utf-8",
     )
     cfg = Config(path=cfg_path)

@@ -212,15 +212,19 @@ class CatalystService:
         payload = {
             "model": model,
             "temperature": 0.0,
-            "messages": [{"role": "system", "content": _SYSTEM},
-                         {"role": "user", "content": f"HEADLINE: {headline}\n\n{body[:2000]}"}],
+            "stream": False,
+            # system merged into the user turn: gateways that drop role="system"
+            # otherwise answer as if no instructions were given (see auditor.http_caller)
+            "messages": [{"role": "user",
+                          "content": f"{_SYSTEM}\n\nHEADLINE: {headline}\n\n{body[:2000]}"}],
             "response_format": {"type": "json_object"},
         }
         resp = requests.post(f"{base}/chat/completions", json=payload, timeout=timeout,
                              headers={"Authorization": f"Bearer {self.cfg.raw('AI_KEY')}"})
         resp.raise_for_status()
-        data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        # Same gateway quirk as the auditor: SSE chunks even with stream=false.
+        from .auditor import model_text
+        return model_text(resp.text, resp.headers.get("Content-Type", ""))
 
     @staticmethod
     def _parse(symbol: str, item_id: str, kind: str, headline: str,

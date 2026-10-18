@@ -213,9 +213,8 @@ class TelegramClient:
 # Keys a user may set from Telegram after install (everything else stays at its
 # safe default in config.env). /setkey is the installer's "add keys later" path.
 SETTABLE_KEYS = (
-    "FINVIZ_TOKEN", "TWELVEDATA_KEY", "FINNHUB_KEY", "ALPHA_VANTAGE_KEY",
-    "ALPACA_KEY", "ALPACA_SECRET", "SEC_USER_AGENT",
-    "OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL",
+    "FINVIZ_TOKEN", "FINNHUB_KEY", "ALPHA_VANTAGE_KEY",
+    "ALPACA_KEY", "ALPACA_SECRET", "AI_KEY", "AI_BASE_URL", "AI_MODEL",
 )
 
 # Every command the bot understands. Owner-chat only. `setkey`/`start`/`help`
@@ -225,6 +224,7 @@ COMMANDS = (
     ("/help", "list every command"),
     ("/setkey KEY VALUE", "set an API key after install (secrets saved, not echoed)"),
     ("/setbudget N", "set the daily IGNITION alert budget (1..10, applied immediately)"),
+    ("/resetbudget", "clear today's spent IGNITION slots (budget back to 0/N)"),
     ("/keys", "show which API keys are set and which are missing"),
     ("/status", "now, session mode, shadow clock and alert budget used"),
     ("/board", "the latest ranked board (top candidates)"),
@@ -282,6 +282,21 @@ def _menu_payload(commands) -> list[dict]:
         desc = re.sub(r"\s+", " ", str(raw_desc)).strip()[:256] or "ROTD command"
         payload.append({"command": name, "description": desc})
     return payload
+
+
+def used_today(ctx: Optional[dict], cfg: "Config") -> int:
+    """IGNITION alerts already spent today (live state first, DB as fallback)."""
+    rt = (ctx or {}).get("runtime")
+    sm = getattr(rt, "sm", None) if rt is not None else None
+    if sm is not None:
+        return sm.budget.used
+    store = (ctx or {}).get("store")
+    if store is not None:
+        try:
+            return store.count_alerts(session_info().trading_day, "IGNITION")
+        except Exception:  # noqa: BLE001 - a reply must never fail on a DB hiccup
+            return 0
+    return 0
 
 
 def handle_command(self, text: str, sender_chat: str, cfg: "Config",
@@ -351,9 +366,25 @@ def handle_command(self, text: str, sender_chat: str, cfg: "Config",
         # Apply to the live per-day budget immediately (no restart). The next
         # day's StateMachine picks the persisted value up from config anyway.
         rt = (ctx or {}).get("runtime")
+        if rt is not None:
+            if getattr(rt, "sm", None) is not None:
+                rt.sm.budget.relabel(n, rt.sm.budget.reserve)
+            if getattr(rt, "cfg", None) is not None:
+                rt.cfg.set("ALERT_BUDGET_PER_DAY", str(n))
+        return f"Budget updated: {used_today(ctx, cfg)}/{n} used today"
+
+    if name == "resetbudget":
+        rt = (ctx or {}).get("runtime")
+        sm = getattr(rt, "sm", None) if rt is not None else None
+        day = sm.budget.day if sm is not None else session_info().trading_day
+        store = (ctx or {}).get("store")
+        if store is not None:
+            store.reset_budget(day, "IGNITION")
         if rt is not None and getattr(rt, "sm", None) is not None:
-            rt.sm.budget.limit = n
-        return f"ok: daily alert budget set to {n} (applied immediately)"
+            rt.sm.budget.reset()
+        limit = (rt.sm.budget.limit if rt is not None and getattr(rt, "sm", None)
+                 else cfg.int("ALERT_BUDGET_PER_DAY", 5))
+        return f"Budget updated: 0/{limit} used today"
 
     if name == "keys":
         lines = ["ROTD API keys:"]
@@ -366,10 +397,8 @@ def handle_command(self, text: str, sender_chat: str, cfg: "Config",
         from .shadow import status as shadow_status
         si = session_info()
         st = shadow_status(ctx["store"], cfg=cfg) if ctx else shadow_status(None, cfg=cfg)
-        budget = cfg.int("ALERT_BUDGET_PER_DAY", 3)
-        used = 0
-        if ctx and ctx.get("store"):
-            used = ctx["store"].count_alerts(si.trading_day, "IGNITION")
+        budget = cfg.int("ALERT_BUDGET_PER_DAY", 5)
+        used = used_today(ctx, cfg)
         blk = " (BLOCKED: shadow incomplete)" if not st.live_allowed else ""
         return (f"ROTD status  {fmt_ts(now_utc())}\n"
                 f"  mode={si.mode}  trading_day={si.trading_day}  half={si.is_half}\n"

@@ -100,8 +100,8 @@ class _FakeTV:
         return self.batch
 
 
-class _FakeTD:
-    """Stands in for the paced TwelveData fallback."""
+class _FakeFinnhub:
+    """Stands in for the paced Finnhub freshness fallback."""
 
     def __init__(self):
         self.calls = 0
@@ -114,13 +114,13 @@ class _FakeTD:
                 "volume": 100.0, "prev_close": 3.20}
 
 
-def _runtime(tmp_path, tv, td):
+def _runtime(tmp_path, tv, fh):
     path = tmp_path / "rt.env"
-    path.write_text("TWELVEDATA_KEY=testkey\nTRADINGVIEW_ENABLED=1\n",
+    path.write_text("FINNHUB_KEY=testkey\nTRADINGVIEW_ENABLED=1\n",
                     encoding="utf-8")
     cfg = Config(path=path)
     store = Store(tmp_path / "rt.db")
-    clients = {"tradingview": tv, "twelvedata": td}
+    clients = {"tradingview": tv, "finnhub": fh}
     return Runtime(cfg, store, clients,
                    notifier=SimpleNamespace(), catalyst=SimpleNamespace())
 
@@ -128,35 +128,35 @@ def _runtime(tmp_path, tv, td):
 NOW = datetime(2026, 10, 14, 15, 0, tzinfo=timezone.utc)
 
 
-def test_runtime_prefers_batch_and_skips_twelvedata(tmp_path):
+def test_runtime_prefers_batch_and_skips_finnhub(tmp_path):
     tv = _FakeTV({"AA": {"close": 3.42, "change_pct": 5.0, "volume": 1000},
                   "BB": {"close": 1.05, "change_pct": 2.0, "volume": 500}})
-    td = _FakeTD()
-    rt = _runtime(tmp_path, tv, td)
+    fh = _FakeFinnhub()
+    rt = _runtime(tmp_path, tv, fh)
     out = rt._fresh_points(["AA", "BB"], NOW, reference={"AA": 3.40, "BB": 1.05},
                            mode="OPEN")
     assert set(out) == {"AA", "BB"}
     assert out["AA"][0].source == "tradingview"
-    assert td.calls == 0, "TwelveData must be skipped when one batch covers the pool"
+    assert fh.calls == 0, "Finnhub must be skipped when one batch covers the pool"
 
 
 def test_runtime_drops_deviant_price_then_falls_back(tmp_path):
     tv = _FakeTV({"AA": {"close": 10.0, "change_pct": 5.0, "volume": 1000}})
-    td = _FakeTD()
-    rt = _runtime(tmp_path, tv, td)
+    fh = _FakeFinnhub()
+    rt = _runtime(tmp_path, tv, fh)
     out = rt._fresh_points(["AA"], NOW, reference={"AA": 3.40}, mode="OPEN")
-    # 10.0 is >20% off the Finviz anchor: rejected; falls back to TwelveData.
-    assert out["AA"][0].source == "twelvedata"
-    assert td.calls == 1
+    # 10.0 is >20% off the Finviz anchor: rejected; falls back to Finnhub.
+    assert out["AA"][0].source == "finnhub"
+    assert fh.calls == 1
 
 
 def test_runtime_ignores_batch_outside_regular_session(tmp_path):
     tv = _FakeTV({"AA": {"close": 3.42, "change_pct": 5.0, "volume": 1000}})
-    td = _FakeTD()
-    rt = _runtime(tmp_path, tv, td)
+    fh = _FakeFinnhub()
+    rt = _runtime(tmp_path, tv, fh)
     out = rt._fresh_points(["AA"], NOW, reference={"AA": 3.40}, mode="POST")
-    assert out["AA"][0].source == "twelvedata", "extended hours stay with verified feeds"
-    assert tv.calls == 1 and td.calls == 1
+    assert out["AA"][0].source == "finnhub", "extended hours stay with verified feeds"
+    assert tv.calls == 1 and fh.calls == 1
 
 
 def test_runtime_survives_batch_failure(tmp_path):
@@ -164,7 +164,7 @@ def test_runtime_survives_batch_failure(tmp_path):
         def fetch_batch_metrics(self, symbols):
             raise SourceError("tradingview: HTTP 500")
 
-    td = _FakeTD()
-    rt = _runtime(tmp_path, _BoomTV(), td)
+    fh = _FakeFinnhub()
+    rt = _runtime(tmp_path, _BoomTV(), fh)
     out = rt._fresh_points(["AA"], NOW, reference={"AA": 3.40}, mode="OPEN")
-    assert out["AA"][0].source == "twelvedata"
+    assert out["AA"][0].source == "finnhub"

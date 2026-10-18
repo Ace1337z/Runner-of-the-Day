@@ -17,7 +17,7 @@ from rotd.telegram import TelegramClient, FakeTelegram, SETTABLE_KEYS, handle_co
 def main() -> int:
     d = tempfile.mkdtemp()
     cfg_path = Path(d) / "rotd.env"
-    cfg_path.write_text("FINVIZ_TOKEN=\nTWELVEDATA_KEY=\n", encoding="utf-8")
+    cfg_path.write_text("FINVIZ_TOKEN=\nFINNHUB_KEY=\n", encoding="utf-8")
     cfg = Config(path=cfg_path)
 
     tg = TelegramClient(cfg, secrets=["secretvalue"])
@@ -40,10 +40,10 @@ def main() -> int:
 
     # FakeTelegram records + still applies
     ft = FakeTelegram(cfg)
-    rep4 = ft.handle_command("/setkey TWELVEDATA_KEY tdkey", "12345", cfg)
+    rep4 = ft.handle_command("/setkey FINNHUB_KEY tdkey", "12345", cfg)
     assert rep4.startswith("ok:"), rep4
-    assert "TWELVEDATA_KEY tdkey" in ft.commands[0]
-    assert cfg.raw("TWELVEDATA_KEY") == "tdkey"
+    assert "FINNHUB_KEY tdkey" in ft.commands[0]
+    assert cfg.raw("FINNHUB_KEY") == "tdkey"
 
     # usage
     rep5 = tg.handle_command("/setkey", "12345", cfg)
