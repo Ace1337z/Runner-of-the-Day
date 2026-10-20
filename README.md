@@ -141,7 +141,9 @@ release:
   `MIN_VOL_3M_SHARES`, `MIN_DVOL_10M_REG/EXT`, `MAX_DRAWDOWN_FROM_HOD_PCT`,
   `RAW_RETENTION_HOURS`, `CAND_RETENTION_HOURS`, `DB_PRUNE_INTERVAL_S`,
   `CAND_JSON_TOP_N`, `MEMORY_TTL_S`, `VOL_HISTORY_RESTORE_MIN`,
-  `ALERT_BUDGET_MIN/MAX`. `rotd config KEY` prints any of them.
+  `ALERT_BUDGET_MIN/MAX`, `IGNITION_THRESHOLD`, `ARM_MIN_SCORE`, `ARM_MAX_RANK`,
+  `REG_CONFIRM_BARS`, `EXT_CONFIRM_BARS`, `CHASE_CAP_PCT`, `AI_TIMEOUT_S`.
+  `rotd config KEY` prints any of them.
 - **The database migrates itself** on first start (WAL, indexes, retention
   window, `auto_vacuum`). No manual SQL. The `subscribers` table is created by
   the same migration; existing installs start with an empty guest list, so
@@ -151,9 +153,11 @@ release:
 ### Reclaiming a bloated database (one time)
 
 The previous release kept every raw payload, every per-cycle candidate row and a
-full snapshot per cycle, and grew the DB to tens of GB in two days. Retention now
-prunes raw payloads after 24h, non-board candidates/decisions after 48h, and
-snapshots after 24h, and runs at startup and then hourly.
+full snapshot per cycle, and grew the DB to tens of GB in two days. Now only the
+top `CAND_JSON_TOP_N` ranked names are persisted at all (one **overwrite** row
+per symbol, not one per 5-second tick), retention is 2h for raw payloads,
+candidates/decisions and snapshots, and the prune + incremental-vacuum pass runs
+every 5 minutes (`DB_PRUNE_INTERVAL_S=300`) so `rotd.db` stays small.
 
 Deleting rows does **not** shrink the file on a legacy DB: `auto_vacuum` only
 takes effect on a new file or after a full `VACUUM`, and a full `VACUUM` needs
@@ -294,7 +298,7 @@ the armed *level* is not persisted, so a restart can never ignite a name on a
 price it has not re-confirmed.
 
 Snapshots store only the tracked pool's `quality_json["volumes"]` /
-`["prices"]`, not the whole universe, and are pruned after 24h.
+`["prices"]`, not the whole universe, and are pruned after 2h.
 
 ### Front-side only: rolling VWAP and drawdown from HOD
 
@@ -668,9 +672,9 @@ purpose. Secrets (`secret=True`) are never displayed or logged.
 ### Live-volume gate & front-side structure
 | Setting | Default | Unit | Meaning |
 |---|---|---|---|
-| `MIN_VOL_3M_SHARES` | `25000` | shares | Minimum shares traded in the last 3 minutes (rolling in-memory delta). Blocks ARMED/IGNITION on dead tape; warmup also fails closed. |
-| `MIN_DVOL_10M_REG` | `75000` | USD | Minimum 10-minute rolling dollar volume in OPEN/MIDDAY. |
-| `MIN_DVOL_10M_EXT` | `25000` | USD | Minimum 10-minute rolling dollar volume in PRE/POST. |
+| `MIN_VOL_3M_SHARES` | `15000` | shares | Minimum shares traded in the last 3 minutes (rolling in-memory delta). Blocks ARMED/IGNITION on dead tape; warmup also fails closed. |
+| `MIN_DVOL_10M_REG` | `40000` | USD | Minimum 10-minute rolling dollar volume in OPEN/MIDDAY. |
+| `MIN_DVOL_10M_EXT` | `15000` | USD | Minimum 10-minute rolling dollar volume in PRE/POST. |
 | `MAX_DRAWDOWN_FROM_HOD_PCT` | `12.0` | % | Block ARMED→IGNITION when price is more than this below the day high. |
 
 ### Gates (fail-closed; run before scoring)
@@ -723,10 +727,11 @@ silently cap the score.
 | `QUALIFY_CONSEC` | `2` | cycles | Consecutive fully-gated cycles to reach QUALIFIED. |
 | `BOARD_MIN_DWELL_S` | `60` | s | Must stay top-5 this long to hold BOARD. |
 | `BOARD_EXIT_RANK` | `8` | rank | Leaves BOARD only below this rank. |
-| `ARM_MAX_RANK` | `2` | rank | ARMED requires rank ≤ this. |
-| `ARM_MIN_SCORE` | `75` | points | ARMED requires score ≥ this. |
-| `CHASE_CAP_PCT` | `4.0` | % | No ignition if price is >this% above the armed level. |
-| `EXT_CONFIRM_BARS` | `2` | bars | POST/PRE need this many confirming extended bars. |
+| `ARM_MAX_RANK` | `3` | rank | ARMED requires rank ≤ this. |
+| `ARM_MIN_SCORE` | `68` | points | ARMED requires score ≥ this. |
+| `IGNITION_THRESHOLD` | `70` | points | ARMED keeps its confirmation only while score ≥ this (last gate before IGNITION). |
+| `CHASE_CAP_PCT` | `25.0` | % | No ignition if price is >this% above the armed level. |
+| `EXT_CONFIRM_BARS` | `1` | bars | POST/PRE need this many confirming extended bars. |
 | `REG_CONFIRM_BARS` | `1` | bars | Regular hours need this many confirming bars. |
 | `HALT_RESUME_EVAL_MIN` | `2` | minutes | Evaluate a resumption for this long after a halt. |
 
@@ -734,7 +739,8 @@ Ladder: `WATCH → QUALIFIED → BOARD → ARMED → IGNITION`. Transitions are
 reversible and every step stores a reason.
 
 **Fail-closed arming.** ARMED means "top name *right now*". While a name waits for
-its confirmation bars, rank (`≤ ARM_MAX_RANK`) and score (`≥ ARM_MIN_SCORE`) are
+its confirmation bars, rank (`≤ ARM_MAX_RANK`) and score (`≥ ARM_MIN_SCORE`, then
+`≥ IGNITION_THRESHOLD` for the final confirmation) are
 re-checked every cycle, and so is live volume and drawdown-from-HOD. If any of
 them slips — it loses the top rank to a competitor, its score falls during
 confirmation, its tape dies, or it fades off the high — it steps back down (to
@@ -811,10 +817,10 @@ rules-only deployment prints `~ catalyst: no model configured`.
 ### Retention, database & ops
 | Setting | Default | Unit | Meaning |
 |---|---|---|---|
-| `RAW_RETENTION_HOURS` | `24` | hours | Delete raw payloads older than this (keeps recent replay/debugging). |
-| `CAND_RETENTION_HOURS` | `48` | hours | Delete non-board candidates/decisions older than this; board/armed/ignition rows are kept. |
+| `RAW_RETENTION_HOURS` | `2` | hours | Delete raw payloads older than this (2h is enough for replay/debugging). |
+| `CAND_RETENTION_HOURS` | `2` | hours | Delete candidates/decisions older than this; alerts/snapshots are the grading record. |
 | `RAW_RETENTION_DAYS` | `7` | days | Hard prune of `raw_payloads` and stale `candidates`. |
-| `DB_PRUNE_INTERVAL_S` | `3600` | s | Run retention + incremental vacuum this often (and once at startup). |
+| `DB_PRUNE_INTERVAL_S` | `300` | s | Run retention + incremental vacuum this often (and once at startup). |
 | `CAND_JSON_TOP_N` | `50` | rank | Keep full gate/feature JSON only for this many top names; other rows store compact reasons. |
 | `MEMORY_TTL_S` | `7200` | s | Evict per-symbol in-memory dictionaries after this long out of the active universe. |
 | `VOL_HISTORY_RESTORE_MIN` | `15` | minutes | On restart, rehydrate the rolling volume history from this recent window. |

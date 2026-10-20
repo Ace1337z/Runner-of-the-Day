@@ -479,17 +479,17 @@ class Runtime:
                 gate_failures[sym] = rep.summary()
 
         rk = rank(scored, self.cfg)
-        # Persist candidates only after scoring/ranking so the DB reflects the
-        # actual score and rank for passed candidates. Gated-out candidates remain
-        # recorded with NULL score/rank and their first failing gate reason.
-        # Item 6: full gate/feature JSON only for the top ``CAND_JSON_TOP_N`` names;
-        # everything else stores a compact reason, because per-tick JSON for 3,000
-        # symbols is what grew the DB to 93 GB.
+        # Bloat fix (2026-10): persist only the top ``CAND_JSON_TOP_N`` *ranked*
+        # names, one overwrite row each, and full JSON only for those same rows.
+        # Writing every gated-out symbol per 5-second tick is what grew rotd.db to
+        # 44M candidate rows (72 GB) in a single day.
         top_n = self.cfg.int("CAND_JSON_TOP_N", 50)
         for sym, rep in gates_by.items():
             sc = scored_by.get(sym)
             ranked = sc is not None and sc.rank is not None and sc.rank <= top_n
-            keep_full = bool(rep.passed or ranked)
+            if not ranked:
+                continue
+            keep_full = bool(ranked)
             self.store.save_candidate(
                 day, mode, now, sym,
                 round(sc.score, 2) if sc else None,

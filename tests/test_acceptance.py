@@ -187,6 +187,7 @@ def test_state_machine_ladder_and_budget(cfg: Config):
     cfg._values["ALERT_BUDGET_PER_DAY"] = "1"
     cfg._values["ARM_MIN_SCORE"] = "0"
     cfg._values["ARM_MAX_RANK"] = "5"
+    cfg._values["IGNITION_THRESHOLD"] = "0"
     cfg._values["ROTD_MIN_SCORE"] = "0"
     sm = StateMachine(cfg, date(2026, 10, 13))
     snap, rec, fs, rep, sc = _gated(cfg, _runner())

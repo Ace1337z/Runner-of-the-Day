@@ -80,12 +80,12 @@ _GLOBAL: list[Setting] = [
 
     # --- hard live-volume gate (section 2) ---
     # Fail closed on warmup/dead tape: whole-day volume is NOT enough to alert.
-    Setting("MIN_VOL_3M_SHARES", "25000", "shares",
+    Setting("MIN_VOL_3M_SHARES", "15000", "shares",
             "Minimum shares traded in the last 3 minutes (in-memory rolling delta). "
             "Blocks ARMED/IGNITION on dead tape; None (warmup) also fails closed."),
-    Setting("MIN_DVOL_10M_REG", "75000", "USD",
+    Setting("MIN_DVOL_10M_REG", "40000", "USD",
             "Minimum 10-minute rolling dollar volume in OPEN/MIDDAY."),
-    Setting("MIN_DVOL_10M_EXT", "25000", "USD",
+    Setting("MIN_DVOL_10M_EXT", "15000", "USD",
             "Minimum 10-minute rolling dollar volume in PRE/POST."),
 
     # --- front-side structure (section 8) ---
@@ -136,10 +136,11 @@ _GLOBAL: list[Setting] = [
     Setting("QUALIFY_CONSEC", "2", "cycles", "Consecutive fully-gated cycles to reach QUALIFIED."),
     Setting("BOARD_MIN_DWELL_S", "60", "s", "Must stay top-5 this long to hold BOARD (hysteresis)."),
     Setting("BOARD_EXIT_RANK", "8", "rank", "Leaves BOARD only below this rank (hysteresis)."),
-    Setting("ARM_MAX_RANK", "2", "rank", "ARMED requires rank <= this."),
-    Setting("ARM_MIN_SCORE", "75", "points", "ARMED requires score >= this, re-checked every cycle while ARMED."),
-    Setting("CHASE_CAP_PCT", "4.0", "%", "No ignition if price is >this% above the armed level."),
-    Setting("EXT_CONFIRM_BARS", "2", "bars", "POST/PRE need this many confirming extended bars."),
+    Setting("ARM_MAX_RANK", "3", "rank", "ARMED requires rank <= this."),
+    Setting("ARM_MIN_SCORE", "68", "points", "ARMED requires score >= this, re-checked every cycle while ARMED."),
+    Setting("IGNITION_THRESHOLD", "70", "points", "ARMED keeps its confirmation only while score >= this; the last gate before IGNITION."),
+    Setting("CHASE_CAP_PCT", "25.0", "%", "No ignition if price is >this% above the armed level."),
+    Setting("EXT_CONFIRM_BARS", "1", "bars", "POST/PRE need this many confirming extended bars."),
     Setting("REG_CONFIRM_BARS", "1", "bars", "Regular hours need this many confirming bars."),
     Setting("HALT_RESUME_EVAL_MIN", "2", "minutes", "Evaluate a resumption for this long after a halt."),
 
@@ -171,6 +172,7 @@ _GLOBAL: list[Setting] = [
     Setting("CATALYST_TOP_N_EARLY", "10", "rank", "Audit a candidate's catalyst early once it reaches this rank."),
     Setting("CATALYST_CACHE_TTL_H", "24", "hours", "Cache a catalyst audit by (symbol, item id)."),
     Setting("CATALYST_TIMEOUT_S", "45", "s", "LLM call timeout; on timeout the catalyst is UNKNOWN."),
+    Setting("AI_TIMEOUT_S", "30", "s", "Request timeout for AI auditor/verdict calls; longer prompts to slow gateways need 30s."),
     Setting("AI_PROMPT_FILE", "methodology_v3.md", "file", "System prompt file under prompts/ (§10)."),
     Setting("AI_TEMPERATURE", "0.0", "float", "Auditor temperature; 0 is required by A6."),
     Setting("AI_MAX_TOKENS", "1200", "tokens", "Auditor response cap (A6: near 1200)."),
@@ -195,11 +197,11 @@ _GLOBAL: list[Setting] = [
 
     # --- retention / ops (section 13, 15) ---
     Setting("RAW_RETENTION_DAYS", "7", "days", "Delete raw_payloads and non-qualified per-cycle data older than this."),
-    Setting("RAW_RETENTION_HOURS", "24", "hours",
-            "Delete raw_payloads older than this (24h keeps replay/recent debugging only)."),
-    Setting("CAND_RETENTION_HOURS", "48", "hours",
+    Setting("RAW_RETENTION_HOURS", "2", "hours",
+            "Delete raw_payloads older than this (2h is enough for replay/debugging)."),
+    Setting("CAND_RETENTION_HOURS", "2", "hours",
             "Delete non-board candidates/decisions older than this; board/armed/ignition rows are kept."),
-    Setting("DB_PRUNE_INTERVAL_S", "3600", "s",
+    Setting("DB_PRUNE_INTERVAL_S", "300", "s",
             "Run the retention + incremental-vacuum pass this often (and once at startup)."),
     Setting("CAND_JSON_TOP_N", "50", "rank",
             "Keep full gate/feature JSON only for this many top names; other rows store compact reasons."),

@@ -113,6 +113,7 @@ def test_backside_of_hod_blocks_ignition(cfg: Config):
     cfg._values["QUALIFY_CONSEC"] = "1"
     cfg._values["ARM_MIN_SCORE"] = "0"
     cfg._values["ARM_MAX_RANK"] = "5"
+    cfg._values["IGNITION_THRESHOLD"] = "0"
     cfg._values["REG_CONFIRM_BARS"] = "50"  # park in ARMED
     rec = Canonical(symbol="EXMP", price=2.31, prev_close=1.90, open=2.00,
                     volume=3_000_000, volume_basis="SINGLE_VENUE", bid=2.30,

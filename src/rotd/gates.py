@@ -269,11 +269,11 @@ def live_volume_reason(vol_3m: Optional[float], dvol_10m: Optional[float],
     """
     if vol_3m is None:
         return R_NO_VOL_HISTORY
-    if vol_3m <= 0 or vol_3m < cfg.float("MIN_VOL_3M_SHARES", 25000):
+    if vol_3m <= 0 or vol_3m < cfg.float("MIN_VOL_3M_SHARES", 15000):
         return R_RECENT_VOL_TOO_LOW
     if dvol_10m is not None:
         key = "MIN_DVOL_10M_EXT" if mode in ("PRE", "POST", "OVERNIGHT") else "MIN_DVOL_10M_REG"
-        floor = cfg.float(key, 25000 if key.endswith("EXT") else 75000)
+        floor = cfg.float(key, 15000 if key.endswith("EXT") else 40000)
         if dvol_10m < floor:
             return R_DVOL_10M_TOO_LOW
     return None

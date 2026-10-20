@@ -685,12 +685,15 @@ def cmd_replay(cfg: Config, args: argparse.Namespace) -> int:
         store.close()
         return 1
     print(f"replaying {day}: {len(snaps)} snapshots")
+    # Candidates are stored as latest state per symbol (one row per day/mode),
+    # not one row per tick, so report the day's stored candidate state once.
+    cands = store.query("SELECT * FROM candidates WHERE trading_day=?",
+                        (day.isoformat(),))
+    passed = sum(1 for c in cands if c["passed_gates"])
+    print(f"  latest candidate state: {len(cands)} symbols stored, {passed} gated_pass")
     for s in snaps:
-        cands = store.query("SELECT * FROM candidates WHERE trading_day=? AND cycle_ts=?",
-                            (day.isoformat(), s["cycle_ts"]))
-        passed = sum(1 for c in cands if c["passed_gates"])
         print(f"  {s['cycle_ts']}  mode={s['mode']}  grade={s['data_grade']}  "
-              f"names={s['n_symbols']}  gated_pass={passed}")
+              f"names={s['n_symbols']}")
     # determinism check: the recipe hash is stable
     print(f"replay hash of first snapshot: {snaps[0]['payload_hash'][:16]}")
     store.close()

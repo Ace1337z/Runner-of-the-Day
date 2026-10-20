@@ -304,10 +304,10 @@ class StateMachine:
             if check_arm:
                 rank = rank_of.get(sym, 999)
                 score = score_of.get(sym, 0.0)
-                if rank > self.cfg.int("ARM_MAX_RANK", 2):
+                if rank > self.cfg.int("ARM_MAX_RANK", 3):
                     out.append(Transition(sym, prev, prev, R_ARM_RANK, f"rank {rank}"))
                     continue
-                if score < self.cfg.float("ARM_MIN_SCORE", 75):
+                if score < self.cfg.float("ARM_MIN_SCORE", 68):
                     out.append(Transition(sym, prev, prev, R_ARM_SCORE, f"score {score:.1f}"))
                     continue
                 # HARD live-volume gate (section 2): a dead chart cannot arm.
@@ -338,13 +338,15 @@ class StateMachine:
                 # confirmation toward an ignition it no longer deserves.
                 rank = rank_of.get(sym, 999)
                 score = score_of.get(sym, 0.0)
-                if rank > self.cfg.int("ARM_MAX_RANK", 2):
+                if rank > self.cfg.int("ARM_MAX_RANK", 3):
                     st.confirm_bars = 0
                     back = State.BOARD if sym in board_syms else State.QUALIFIED
                     out.append(self._move(st, back, R_ARM_STEP_RANK, f"rank {rank}"))
                     prev = st.state
                     continue
-                if score < self.cfg.float("ARM_MIN_SCORE", 75):
+                # The last gate before IGNITION: even a *ranked* name must stay at
+                # or above the ignition score while confirming, or it steps back.
+                if score < self.cfg.float("IGNITION_THRESHOLD", 70):
                     st.confirm_bars = 0
                     back = State.BOARD if sym in board_syms else State.QUALIFIED
                     out.append(self._move(st, back, R_ARM_STEP_SCORE, f"score {score:.1f}"))
@@ -377,7 +379,7 @@ class StateMachine:
                                               f"+{chase:.1f}% above armed"))
                         continue
                 # Confirmation bars (extended needs more than regular).
-                need = (self.cfg.int("EXT_CONFIRM_BARS", 2) if mode in ("PRE", "POST", "OVERNIGHT")
+                need = (self.cfg.int("EXT_CONFIRM_BARS", 1) if mode in ("PRE", "POST", "OVERNIGHT")
                         else self.cfg.int("REG_CONFIRM_BARS", 1))
                 st.confirm_bars += 1
                 if st.confirm_bars < need:

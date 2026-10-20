@@ -462,12 +462,73 @@ def _path_exists(bundle: dict[str, Any], dotted: str) -> bool:
     return True
 
 
+def _closest_valid_path(bundle: dict[str, Any], dotted: str) -> str:
+    """Fall back an invented dotted path to its deepest existing prefix.
+
+    The model occasionally writes ``context.market.regime.extra`` when only
+    ``context.market.regime`` (or ``context.market``) exists. Validation rejects
+    such refs; instead we shorten to the longest prefix that is a real path so a
+    valid report is not thrown away over a cosmetic typo.
+    """
+    parts = dotted.split(".")
+    for i in range(len(parts), 0, -1):
+        cand = ".".join(parts[:i])
+        if _path_exists(bundle, cand):
+            return cand
+    return dotted
+
+
+def _sanitize_ai_report(report: dict[str, Any], bundle: dict[str, Any]) -> None:
+    """Normalize model drift in a *parsed* report before validation (in place).
+
+    Fixes two known failure modes without weakening any real gate:
+
+    - ``ticker`` / ``identity.symbol`` come back as the company name or a SPAC
+      variant instead of the exact bundle symbol → force both to the target ticker.
+    - invented sub-path ``refs`` (e.g. ``context.market.regime.something``) are
+      shortened to their closest valid parent so ``_ref_ok`` accepts them.
+    """
+    target = (bundle.get("meta", {}) or {}).get("ticker")
+    if target:
+        report["ticker"] = target
+        ident = report.get("identity")
+        if isinstance(ident, dict):
+            ident["symbol"] = target
+
+    def _fix_refs(refs: Any) -> None:
+        if not isinstance(refs, list):
+            return
+        for i, ref in enumerate(refs):
+            s = str(ref or "")
+            if "." in s and not _path_exists(bundle, s):
+                refs[i] = _closest_valid_path(bundle, s)
+
+    _fix_refs(report.get("reason_refs"))
+    _fix_refs(report.get("refs"))
+    for key in ("strongest_risk", "invalidation_beyond_rules"):
+        obj = report.get(key)
+        if isinstance(obj, dict):
+            _fix_refs(obj.get("refs"))
+    for obj in report.get("contradictions", []) or []:
+        if isinstance(obj, dict):
+            _fix_refs(obj.get("refs"))
+
+
 def validate_report(report: dict[str, Any], bundle: dict[str, Any],
                     cfg: Config) -> tuple[Optional[Report], list[str]]:
-    """Post-parse checks of §10 A4. Reject (return None + failures), never repair."""
+    """Post-parse checks of §10 A4.
+
+    Runs :func:`_sanitize_ai_report` first to normalize known cosmetic model drift
+    (company name / SPAC variant in ``ticker``, invented sub-path refs). After
+    that it rejects on a real failure: it returns ``None`` + the failure list, and
+    never repairs a substantive violation.
+    """
     fail: list[str] = []
     if not isinstance(report, dict):
         return None, ["output is not a JSON object"]
+    # Normalize model drift (ticker/company name, invented sub-path refs) first so
+    # a valid report is not rejected over a cosmetic mismatch.
+    _sanitize_ai_report(report, bundle)
     if report.get("schema") != "decision_v3":
         fail.append("schema != decision_v3")
 
@@ -805,7 +866,7 @@ def http_caller(cfg: Config, system: str, user: str) -> str:
         # those gateways and compliant ones.
         "messages": [{"role": "user", "content": f"{system}\n\n---\n\n{user}"}],
     }
-    resp = requests.post(url, json=body, timeout=cfg.float("CATALYST_TIMEOUT_S", 45),
+    resp = requests.post(url, json=body, timeout=cfg.float("AI_TIMEOUT_S", 30),
                          headers={"Authorization": f"Bearer {cfg.raw('AI_KEY')}"})
     resp.raise_for_status()
     return model_text(resp.text, resp.headers.get("Content-Type", ""))

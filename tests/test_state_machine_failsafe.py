@@ -60,6 +60,7 @@ def _armed_machine(cfg: Config):
     cfg._values["QUALIFY_CONSEC"] = "1"
     cfg._values["ARM_MIN_SCORE"] = "0"
     cfg._values["ARM_MAX_RANK"] = "5"
+    cfg._values["IGNITION_THRESHOLD"] = "0"  # the last gate must not block setup
     cfg._values["REG_CONFIRM_BARS"] = "50"
     sm = StateMachine(cfg, DAY)
     rec = _rec()
@@ -99,8 +100,8 @@ def test_armed_steps_down_when_rank_slips(cfg: Config):
 
 def test_armed_steps_down_when_score_slips(cfg: Config):
     sm, rec, snap, rk, prices = _armed_machine(cfg)
-    # Now demand a score the name cannot meet.
-    cfg._values["ARM_MIN_SCORE"] = "1000"
+    # Now demand a score the name cannot meet (the last gate before IGNITION).
+    cfg._values["IGNITION_THRESHOLD"] = "1000"
     ts = T0 + timedelta(seconds=330)
     transitions = sm.step(rk, snap.records, "OPEN", now=ts, prices=prices, live=LIVE)
     demotions = [t for t in transitions
@@ -113,7 +114,7 @@ def test_armed_steps_down_when_score_slips(cfg: Config):
 def test_demoted_name_does_not_accrue_confirmation(cfg: Config):
     """While demoted, the confirm counter stays 0, so no ignition can sneak in."""
     sm, rec, snap, rk, prices = _armed_machine(cfg)
-    cfg._values["ARM_MIN_SCORE"] = "1000"
+    cfg._values["IGNITION_THRESHOLD"] = "1000"
     for i in range(4):
         ts = T0 + timedelta(seconds=330 + 30 * i)
         transitions = sm.step(rk, snap.records, "OPEN", now=ts, prices=prices, live=LIVE)
@@ -127,6 +128,7 @@ def test_healthy_armed_name_still_ignites(cfg: Config):
     cfg._values["QUALIFY_CONSEC"] = "1"
     cfg._values["ARM_MIN_SCORE"] = "0"
     cfg._values["ARM_MAX_RANK"] = "5"
+    cfg._values["IGNITION_THRESHOLD"] = "0"
     cfg._values["REG_CONFIRM_BARS"] = "2"
     sm = StateMachine(cfg, DAY)
     rec = _rec()

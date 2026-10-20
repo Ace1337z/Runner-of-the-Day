@@ -4,7 +4,9 @@ One file (``rotd.db`` by default). The schema (build prompt §13) stores:
 
 - ``snapshots``   — one reconciled snapshot per cycle (the single source of truth
   the decision path reads), keyed by (trading_day, mode, cycle_ts).
-- ``candidates``  — per-cycle per-symbol candidate rows (score, gates, reasons).
+- ``candidates``  — latest state per symbol (score, gates, reasons), one row per
+  (trading_day, mode, symbol); only the top ``CAND_JSON_TOP_N`` ranked names are
+  written, which keeps the file small.
 - ``decisions``   — the state-machine transition logged for every symbol/cycle,
   *including rejects*, with reason codes (explainability rule).
 - ``alerts``      — every push actually sent (or shadow-logged), with its budget
@@ -307,12 +309,21 @@ class Store:
                        symbol: str, score: Optional[float], rank: Optional[int],
                        passed_gates: bool, gates: dict[str, Any],
                        features: dict[str, Any], suppression: str = "") -> None:
+        # Overwrite per-symbol state: a symbol gets one row per (day, mode) holding
+        # its *latest* cycle state. Only the top ``CAND_JSON_TOP_N`` ranked names
+        # are ever persisted by the runtime (the caller), so this cannot grow
+        # unbounded even on 5-second ticks. Keeps the legacy replay path working
+        # (latest cycle per symbol is queryable by cycle_ts).
+        sym = symbol.upper()
         self.execute(
-            """INSERT OR REPLACE INTO candidates
+            "DELETE FROM candidates WHERE trading_day=? AND mode=? AND symbol=?",
+            (trading_day.isoformat(), mode, sym))
+        self.execute(
+            """INSERT INTO candidates
                (trading_day, mode, cycle_ts, symbol, score, rank, passed_gates,
                 gate_json, feature_json, suppression)
                VALUES (?,?,?,?,?,?,?,?,?,?)""",
-            (trading_day.isoformat(), mode, _iso(cycle_ts), symbol.upper(),
+            (trading_day.isoformat(), mode, _iso(cycle_ts), sym,
              score, rank, 1 if passed_gates else 0, stable_json(gates),
              stable_json(features), suppression))
 
@@ -659,23 +670,23 @@ class Store:
         return removed
 
     def maintain(self, cfg: Any, today: Optional[date] = None) -> dict[str, int]:
-        """Hourly/startup retention + space reclaim (item 6).
+        """Periodic retention + space reclaim (item 6).
 
-        Deletes raw payloads older than ``RAW_RETENTION_HOURS`` and non-board
+        Deletes raw payloads older than ``RAW_RETENTION_HOURS`` and
         candidates/decisions older than ``CAND_RETENTION_HOURS``, then returns
-        freed pages to the OS in small chunks. Runs off the decision path.
+        freed pages to the OS and truncates the WAL. Runs off the decision path;
+        ``DB_PRUNE_INTERVAL_S`` (default 300s) controls the cadence.
         """
         day = today or now_utc().date()
-        raw_h = cfg.int("RAW_RETENTION_HOURS", 24)
-        cand_h = cfg.int("CAND_RETENTION_HOURS", 48)
+        raw_h = cfg.int("RAW_RETENTION_HOURS", 2)
+        cand_h = cfg.int("CAND_RETENTION_HOURS", 2)
         removed: dict[str, int] = {}
         raw_cut = (now_utc() - timedelta(hours=raw_h)).isoformat()
         cand_cut = (now_utc() - timedelta(hours=cand_h)).isoformat()
         removed["raw_payloads"] = self.execute(
             "DELETE FROM raw_payloads WHERE cycle_ts < ?", (raw_cut,)).rowcount
         removed["candidates"] = self.execute(
-            "DELETE FROM candidates WHERE cycle_ts < ? AND (rank IS NULL OR rank > ?)",
-            (cand_cut, cfg.int("CAND_JSON_TOP_N", 50))).rowcount
+            "DELETE FROM candidates WHERE cycle_ts < ?", (cand_cut,)).rowcount
         removed["decisions"] = self.execute(
             "DELETE FROM decisions WHERE cycle_ts < ? "
             "AND new_state NOT IN ('BOARD','ARMED','IGNITION') "
@@ -685,8 +696,11 @@ class Store:
         removed["snapshots"] = self.execute(
             "DELETE FROM snapshots WHERE cycle_ts < ?", (raw_cut,)).rowcount
         removed.update(self.prune(cfg.int("RAW_RETENTION_DAYS", 7), day))
+        # Aggressive reclaim: candidates are overwritten per symbol, so the table
+        # is tiny; 2h retention is enough for replay/debugging. Free the pages
+        # every pass so rotd.db stays small (was: 72 GB in a day).
         try:
-            self._conn.execute("PRAGMA incremental_vacuum(2000)")
+            self._conn.execute("PRAGMA incremental_vacuum(10000)")
             self._conn.commit()
             self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             self._conn.commit()
