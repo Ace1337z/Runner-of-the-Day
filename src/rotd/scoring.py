@@ -81,24 +81,27 @@ def score_candidate(rec: Canonical, fs: FeatureSet, gates: GateReport, cfg: Conf
     if mode == "POST" and fs.value("ah_change_pct") is not None:
         gain = fs.value("ah_change_pct")
     tape_parts = [
-        _lin(gain, 3.0, 40.0),
-        _lin(fs.value("gain_from_open"), 2.0, 25.0),
-        _lin(fs.value("rvol"), 1.5, 10.0),
-        _lin(fs.value("range_expansion"), 3.0, 25.0),
-        _lin(fs.value("accel_5m"), 1.0, 10.0),
-        _lin(fs.value("vwap_dist"), 0.5, 8.0),
+        _lin(gain, 2.0, 20.0),
+        _lin(fs.value("gain_from_open"), 1.5, 15.0),
+        _lin(fs.value("rvol"), 1.2, 6.0),
+        _lin(fs.value("range_expansion"), 2.0, 15.0),
+        _lin(fs.value("accel_5m"), 0.5, 6.0),
+        _lin(fs.value("vwap_dist"), 0.2, 5.0),
     ]
-    # Short-term volume velocity (Upgrade 1): recent 10m dollar volume rewards a
-    # stock trading RIGHT NOW and punishes a dead-afternoon name that spiked at
-    # the open. MISSING (no history yet) is excluded from the average, so it never
-    # drags a fresh candidate down.
+    # Live volume velocity: reward a stock that is trading right now, punishes
+    # a dead-afternoon name that spiked at the open. Take the max of dollar
+    # volume and share volume so sub-$1 names with high share volume are not
+    # penalized by their low share price.
     dvol10 = fs.value("dollar_volume_10m")
+    vol3 = fs.value("vol_3m")
+    vel = None
     if dvol10 is not None:
-        tape_parts.append(_lin(dvol10, 100_000.0, 5_000_000.0))
-    # Float rotation: a name that has turned over its float is real demand.
-    rot = fs.value("float_rotation")
-    if rot is not None:
-        tape_parts.append(_lin(rot, 0.5, 5.0))
+        vel = _lin(dvol10, 40_000.0, 1_000_000.0)
+    if vol3 is not None:
+        vel_v = _lin(vol3, 50_000.0, 800_000.0)
+        vel = vel_v if vel is None else max(vel, vel_v)
+    if vel is not None:
+        tape_parts.append(vel)
     present = [p for p in tape_parts if p is not None]
     tape = sum(present) / len(present) if present else None
 
@@ -106,26 +109,26 @@ def score_candidate(rec: Canonical, fs: FeatureSet, gates: GateReport, cfg: Conf
     cat = _lin(fs.value("catalyst_score"), 0.0, 100.0)
 
     # --- FUEL (0..1): low float + high short interest = more squeeze fuel ---
-    fuel_parts = []
     fl = fs.value("float_shares")
+    fuel = None
     if fl is not None:
         # Feature adapters normally normalize float to shares; Finviz-origin values
         # may be in millions. Treat plausible small magnitudes as millions, then
-        # score relative to the methodology's 1M..50M range.
+        # score relative to the methodology's 1M..35M range.
         fl_m = fl if fl < 100_000 else fl / 1e6
-        fuel_parts.append(clamp(1.0 - (fl_m - 1.0) / (50.0 - 1.0), 0.0, 1.0))
-    sf = fs.value("short_float_pct")
-    if sf is not None:
-        fuel_parts.append(_lin(sf, 5.0, 30.0))
-    sq = fs.value("squeeze_flag")
-    if sq is not None:
-        fuel_parts.append(sq)
-    # Float rotation (section 8): volume as a multiple of the free float. A name
-    # that has turned its float over has real demand behind it, not just a gap.
-    rot = fs.value("float_rotation")
-    if rot is not None:
-        fuel_parts.append(_lin(rot, 0.5, 3.0))
-    fuel = sum(fuel_parts) / len(fuel_parts) if fuel_parts else None
+        base_fuel = clamp(1.0 - (fl_m - 1.0) / (35.0 - 1.0), 0.0, 1.0)
+
+        sf_bonus = 0.0
+        sf = fs.value("short_float_pct")
+        if sf is not None:
+            sf_bonus = _lin(sf, 5.0, 30.0) * 0.20
+
+        rot_bonus = 0.0
+        rot = fs.value("float_rotation")
+        if rot is not None:
+            rot_bonus = _lin(rot, 0.15, 1.5) * 0.25
+
+        fuel = clamp(base_fuel + sf_bonus + rot_bonus, 0.0, 1.0)
 
     # --- STRUCTURE (0..1): a clean setup ---
     struct_parts = []
