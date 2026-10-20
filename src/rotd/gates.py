@@ -284,7 +284,7 @@ def backside_of_hod(price: Optional[float], day_high: Optional[float],
     """True when price has faded more than ``MAX_DRAWDOWN_FROM_HOD_PCT`` off HOD."""
     if not price or not day_high:
         return False
-    max_dd = cfg.float("MAX_DRAWDOWN_FROM_HOD_PCT", 12.0)
+    max_dd = cfg.float("MAX_DRAWDOWN_FROM_HOD_PCT", 15.0)
     return max_dd > 0 and price < day_high * (1.0 - max_dd / 100.0)
 
 

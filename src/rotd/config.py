@@ -89,9 +89,12 @@ _GLOBAL: list[Setting] = [
             "Minimum 10-minute rolling dollar volume in PRE/POST."),
 
     # --- front-side structure (section 8) ---
-    Setting("MAX_DRAWDOWN_FROM_HOD_PCT", "12.0", "%",
+    Setting("MAX_DRAWDOWN_FROM_HOD_PCT", "15.0", "%",
             "Block ARMED->IGNITION when price is more than this below the day high "
             "(no backside-of-HOD fades)."),
+    Setting("MIN_STRUCTURE_SCORE", "4.0", "points",
+            "Minimum weighted STRUCTURE points (of 15) required to reach ARMED. "
+            "Rejects high-volume/fuel setups with terrible front-side structure."),
 
     # --- gates (section 7) ---
     Setting("EXT_SPREAD_MULT", "1.5", "x", "POST/PRE spreads are looser by 1.5x (G-SPREAD)."),

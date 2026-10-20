@@ -306,10 +306,15 @@ ROTD buys strength, not fades. Two mechanisms enforce that:
 
 - **Rolling VWAP** (`ABORT_VWAP_MINUTES`, 5m) — a 5-minute close under the alert
   VWAP aborts a live alert (`ABORT_VWAP`).
-- **Drawdown from HOD** (`MAX_DRAWDOWN_FROM_HOD_PCT`, 12%) — a price more than
-  12% below the day high blocks `ARMED → IGNITION` (`BACKSIDE_OF_HOD`) and
-  proportionally penalizes the STRUCTURE component, so a +80%-then-−35% chart
-  cannot rank on old strength.
+- **Drawdown from HOD** (`MAX_DRAWDOWN_FROM_HOD_PCT`, 15%) — a price more than
+  15% below the day high blocks `ARMED → IGNITION` (`BACKSIDE_OF_HOD`) and
+  proportionally penalizes the STRUCTURE component (a drawdown at/above the
+  threshold scores ZERO), so a +80%-then-−35% chart cannot rank on old strength.
+- **Minimum structure score** (`MIN_STRUCTURE_SCORE`, 4.0/15) — a heavy-tape name
+  with a weak front-side chart cannot reach ARMED (`ARM_STRUCTURE_TOO_LOW`), and it
+  steps back out mid-confirmation if its chart rolls over
+  (`ARM_STEP_DOWN_STRUCTURE`), so volume/fuel can never carry a dying double-top
+  into an alert.
 
 **Float rotation** (volume ÷ free float) feeds both TAPE and FUEL: a name that
 has turned over its float is real demand, not just a gap.
@@ -675,7 +680,8 @@ purpose. Secrets (`secret=True`) are never displayed or logged.
 | `MIN_VOL_3M_SHARES` | `15000` | shares | Minimum shares traded in the last 3 minutes (rolling in-memory delta). Blocks ARMED/IGNITION on dead tape; warmup also fails closed. |
 | `MIN_DVOL_10M_REG` | `40000` | USD | Minimum 10-minute rolling dollar volume in OPEN/MIDDAY. |
 | `MIN_DVOL_10M_EXT` | `15000` | USD | Minimum 10-minute rolling dollar volume in PRE/POST. |
-| `MAX_DRAWDOWN_FROM_HOD_PCT` | `12.0` | % | Block ARMED→IGNITION when price is more than this below the day high. |
+| `MAX_DRAWDOWN_FROM_HOD_PCT` | `15.0` | % | Block ARMED→IGNITION when price is more than this below the day high; a drawdown at/over this zeroes the structure sub-score. |
+| `MIN_STRUCTURE_SCORE` | `4.0` | points | Minimum weighted STRUCTURE points (of 15) required to reach (and hold) ARMED. |
 
 ### Gates (fail-closed; run before scoring)
 | Gate | Enforced? | Needs | Default setting |
@@ -739,9 +745,10 @@ Ladder: `WATCH → QUALIFIED → BOARD → ARMED → IGNITION`. Transitions are
 reversible and every step stores a reason.
 
 **Fail-closed arming.** ARMED means "top name *right now*". While a name waits for
-its confirmation bars, rank (`≤ ARM_MAX_RANK`) and score (`≥ ARM_MIN_SCORE`, then
-`≥ IGNITION_THRESHOLD` for the final confirmation) are
-re-checked every cycle, and so is live volume and drawdown-from-HOD. If any of
+its confirmation bars, rank (`≤ ARM_MAX_RANK`), score (`≥ ARM_MIN_SCORE`, then
+`≥ IGNITION_THRESHOLD` for the final confirmation), structure
+(`≥ MIN_STRUCTURE_SCORE`), live volume and drawdown-from-HOD are
+re-checked every cycle. If any of
 them slips — it loses the top rank to a competitor, its score falls during
 confirmation, its tape dies, or it fades off the high — it steps back down (to
 `BOARD`, or `QUALIFIED` if it also left the board) and its confirmation counter

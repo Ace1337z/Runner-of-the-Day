@@ -144,12 +144,14 @@ def score_candidate(rec: Canonical, fs: FeatureSet, gates: GateReport, cfg: Conf
     if d52l is not None:
         # Being nearer the 52w low is a better risk/reward for a fresh runner.
         struct_parts.append(clamp(1.0 - d52l / 100.0, 0.0, 1.0))
-    # Front-side only: fading off HOD is penalized in proportion to the drawdown
-    # (section 8), so a +80%-then-35%-off-high chart cannot rank on old strength.
+    # Front-side only: fading off HOD is penalized heavily. A name that has
+    # drifted >= MAX_DRAWDOWN_FROM_HOD_PCT below the high is a rolling-over
+    # double-top candidate: it gets a flat ZERO structure sub-score so high
+    # TAPE/FUEL can never push it over the ignition hurdle (see MIN_STRUCTURE_SCORE).
     dd = fs.value("drawdown_from_hod_pct")
     if dd is not None:
-        max_dd = cfg.float("MAX_DRAWDOWN_FROM_HOD_PCT", 12.0)
-        struct_parts.append(clamp(1.0 - dd / max_dd, 0.0, 1.0) if max_dd > 0 else 0.0)
+        max_dd = cfg.float("MAX_DRAWDOWN_FROM_HOD_PCT", 15.0)
+        struct_parts.append(0.0 if max_dd <= 0 else clamp(1.0 - dd / max_dd, 0.0, 1.0))
     structure = sum(struct_parts) / len(struct_parts) if struct_parts else None
 
     # --- CONTEXT (0..1): session and data quality ---

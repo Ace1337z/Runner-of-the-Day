@@ -17,7 +17,8 @@ from rotd.normalize import Canonical
 from rotd.notifier import Notifier, render_ignition
 from rotd.runtime import Runtime
 from rotd.scoring import ComponentScore, Scored
-from rotd.state_machine import R_BACKSIDE_OF_HOD, State, StateMachine, Transition
+from rotd.state_machine import (R_ARM_STEP_STRUCT, R_BACKSIDE_OF_HOD, State,
+                                StateMachine, Transition)
 from rotd.store import Store
 from rotd.telegram import FakeTelegram, SETTABLE_KEYS, handle_command
 from rotd.util import UTC, now_utc
@@ -140,8 +141,12 @@ def test_backside_of_hod_blocks_ignition(cfg: Config):
     rk = rank([sc], cfg)
     out = sm.step(rk, snap.records, "OPEN", now=T0 + timedelta(seconds=200),
                   prices={"EXMP": rec.price}, live=live)
-    assert any(t.reason == R_BACKSIDE_OF_HOD for t in out), \
-        [(t.symbol, t.reason) for t in out]
+    # A 20% fade is blocked by front-side protection: either the explicit
+    # BACKSIDE_OF_HOD check, or (earlier) the minimum-structure step-down the
+    # zeroed structure sub-score triggers. Both mean: no ignition on the backside.
+    reasons = [(t.symbol, t.reason) for t in out]
+    assert any(t.symbol == "EXMP" and t.reason in (R_BACKSIDE_OF_HOD,
+                                                   R_ARM_STEP_STRUCT) for t in out), reasons
 
 
 # --- item 5: Telegram keys and budget -------------------------------------

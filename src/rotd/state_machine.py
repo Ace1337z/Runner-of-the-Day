@@ -67,8 +67,10 @@ R_ARM = "ARM_RANK_AND_SCORE"
 R_ARM_CHASE = "ARM_CHASE_CAP"
 R_ARM_RANK = "ARM_RANK_TOO_LOW"
 R_ARM_SCORE = "ARM_SCORE_TOO_LOW"
+R_ARM_STRUCT = "ARM_STRUCTURE_TOO_LOW"
 R_ARM_STEP_RANK = "ARM_STEP_DOWN_RANK"
 R_ARM_STEP_SCORE = "ARM_STEP_DOWN_SCORE"
+R_ARM_STEP_STRUCT = "ARM_STEP_DOWN_STRUCTURE"
 R_ARM_STEP_VOL = "ARM_STEP_DOWN_VOL"
 R_IGNITE = "IGNITION_CONFIRMED"
 R_IGNITE_BUDGET = "IGNITION_BUDGET_EXHAUSTED"
@@ -228,6 +230,11 @@ class StateMachine:
         board_syms = {s.symbol for s in ranking.board}
         rank_of = {s.symbol: s.rank for s in ranking.day_ranked}
         score_of = {s.symbol: s.score for s in ranking.day_ranked}
+        # Weighted STRUCTURE component points (raw * W_STRUCTURE=15). Used by the
+        # MIN_STRUCTURE_SCORE gate so heavy volume/fuel can never carry a dying
+        # double-top into ARMED.
+        struct_of = {s.symbol: (s.components.get("STRUCTURE").points if s.components.get("STRUCTURE") else 0.0)
+                     for s in ranking.day_ranked}
         qualified_syms = {s.symbol for s in ranking.day_ranked}
 
         # Extra symbols seen this cycle that are not ranked (still advance state).
@@ -310,6 +317,13 @@ class StateMachine:
                 if score < self.cfg.float("ARM_MIN_SCORE", 68):
                     out.append(Transition(sym, prev, prev, R_ARM_SCORE, f"score {score:.1f}"))
                     continue
+                # Minimum structure gate (section 8): a high-volume/fuel name with a
+                # dying/rolling-over chart must not arm. struct_of is the weighted
+                # STRUCTURE points (0..15); MIN_STRUCTURE_SCORE (default 4.0) is the floor.
+                if struct_of.get(sym, 0.0) < self.cfg.float("MIN_STRUCTURE_SCORE", 4.0):
+                    out.append(Transition(sym, prev, prev, R_ARM_STRUCT,
+                                          f"structure {struct_of.get(sym, 0.0):.1f}/15"))
+                    continue
                 # HARD live-volume gate (section 2): a dead chart cannot arm.
                 vol_reason = _vol_reason(sym)
                 if vol_reason:
@@ -350,6 +364,16 @@ class StateMachine:
                     st.confirm_bars = 0
                     back = State.BOARD if sym in board_syms else State.QUALIFIED
                     out.append(self._move(st, back, R_ARM_STEP_SCORE, f"score {score:.1f}"))
+                    prev = st.state
+                    continue
+                # Structure must hold through the confirmation window too: a name
+                # whose chart rolls over mid-confirmation loses its front-side
+                # promise exactly like a slipping rank does.
+                if struct_of.get(sym, 0.0) < self.cfg.float("MIN_STRUCTURE_SCORE", 4.0):
+                    st.confirm_bars = 0
+                    back = State.BOARD if sym in board_syms else State.QUALIFIED
+                    out.append(self._move(st, back, R_ARM_STEP_STRUCT,
+                                          f"structure {struct_of.get(sym, 0.0):.1f}/15"))
                     prev = st.state
                     continue
                 # Same hard live-volume gate on every ARMED cycle: tape that goes
