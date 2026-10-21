@@ -226,6 +226,10 @@ _GLOBAL: list[Setting] = [
     Setting("SHADOW_DAYS_REQUIRED", "10", "trading_days", "Shadow clock length before live pushes are allowed (section 17 Phase 6)."),
     Setting("SHADOW_AUTOSTART", "0", "bool", "1 = start the shadow clock automatically on the first shadow cycle."),
     Setting("SHADOW_RUN_WHEN_CLOSED", "1", "bool", "1 = keep running decision cycles outside NYSE sessions (live off-thread so commands stay responsive)."),
+    Setting("EXPIRY_REMINDERS", "1", "bool",
+            "1 = DM subscribers the T-7/T-3/T-1/T-0 renewal reminders (once per milestone per expiry; set RENEW_URL for the button)."),
+    Setting("EXPIRY_REMINDER_INTERVAL_S", "3600", "s",
+            "How often the listen daemon checks for due expiry reminders (the cadence itself is date-based, so this only controls latency)."),
 
     # --- secrets (never displayed / never logged) ---
     Setting("FINVIZ_TOKEN", "", "", "Finviz Elite token.", secret=True),
@@ -241,6 +245,9 @@ _GLOBAL: list[Setting] = [
     Setting("AI_MODEL", "deepseek-v4.1-flash", "model", "Catalyst model id."),
     Setting("TELEGRAM_TOKEN", "", "", "Telegram bot token.", secret=True),
     Setting("TELEGRAM_CHAT_ID", "", "", "The only chat id allowed to read/command."),
+    Setting("RENEW_URL", "", "url",
+            "Renewal/payment link attached to every subscription-expiry reminder "
+            "(empty = reminders are sent as plain text with no button)."),
 ]
 
 # Per-mode defaults: liquidity is already mode-keyed above; these carry cadence

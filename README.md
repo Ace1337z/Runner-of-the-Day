@@ -559,6 +559,49 @@ their numeric id and delivers the playbook automatically.
 
 `/checksubs` shows every row (active and expired) with exact days left.
 
+### Expiry reminders (T-7 / T-3 / T-1 / T-0)
+
+The listen daemon checks for expiring subscribers on startup and hourly. A
+subscriber is DM'd exactly **once** per milestone, on the exact day their
+`days_left` hits it:
+
+| Days left | Message | Button |
+| ---: | --- | --- |
+| 7 | ⏳ ROTD Subscription Notice — expires `{expiry_date}` | Renew Now |
+| 3 | ⚠️ 3 Days Left on ROTD Access | Extend My Access |
+| 1 | 🚨 Final Warning: Expires Tomorrow | Renew Immediately |
+| 0 | ❌ Subscription Expired — live alerts paused | Reactivate Now |
+
+Every message carries one inline URL button pointing at `RENEW_URL`. When
+`RENEW_URL` is empty the message still sends, as plain text with no button (a
+button that goes nowhere is worse than none). Reminders are **per-user DMs**,
+never a fan-out to the whole subscriber list, and the owner chat is never a
+recipient.
+
+Dedup lives in its own table so a crash, a restart, or an hourly pass can never
+double-send. A milestone is recorded **only after a successful send**, so a
+blocked chat is retried on the next pass instead of being skipped forever:
+
+```sql
+CREATE TABLE IF NOT EXISTS expiry_reminders_sent (
+    chat_id    TEXT NOT NULL,
+    milestone  INTEGER NOT NULL,   -- 7, 3, 1, 0 (days left when sent)
+    expires_at TEXT NOT NULL,      -- the expiry this reminder belonged to
+    sent_at    TEXT NOT NULL,
+    PRIMARY KEY (chat_id, milestone, expires_at)
+);
+```
+
+Keying on `(chat_id, milestone, expires_at)` means a **renewal starts a fresh
+cadence**: the new expiry has its own T-7/T-3/T-1/T-0 rows, so a subscriber who
+renews and later lapses again is reminded again. Pre-registered `@username`
+placeholders (no numeric id yet) and malformed expiry dates are skipped.
+
+Turn it off with `EXPIRY_REMINDERS=0`. `EXPIRY_REMINDER_INTERVAL_S` only
+controls how promptly the daemon notices a due milestone — the cadence itself is
+date-based, so a longer interval delays a reminder within the day but never
+skips one.
+
 `/addsub` immediately pushes the welcome playbook (how to trade an IGNITION:
 pullback vs HOD breakout, VWAP stop, scaling out, ABORT handling) to the new
 chat. If the bot has never been messaged by that chat it cannot open the DM;
@@ -648,7 +691,7 @@ purpose. Secrets (`secret=True`) are never displayed or logged.
 | `AI_MODEL` | `deepseek-v4.1-flash` | model | Catalyst model id. |
 | `TELEGRAM_TOKEN` ★ | (empty) | — | Telegram bot token (asked at install). |
 | `TELEGRAM_CHAT_ID` | (empty) | — | The only chat allowed to read/command (asked at install). |
-
+| `RENEW_URL` | (empty) | url | Renewal/payment link on every expiry reminder (empty = plain-text reminders, no button). |
 ★ = secret (never displayed / logged).
 
 ### Universe & scope
@@ -853,6 +896,8 @@ only gains `auto_vacuum` after a full `VACUUM` or a fresh file — see
 | `LISTEN_POLL_S` | `5` | s | `rotd listen` loop cadence: one cycle + one command poll. |
 | `TELEGRAM_POLL_TIMEOUT_S` | `20` | s | Long-poll timeout for `getUpdates`. |
 | `WATCHDOG_STALL_S` | `180` | s | A cycle longer than this trips the watchdog. |
+| `EXPIRY_REMINDERS` | `1` | bool | 1 = DM subscribers the T-7/T-3/T-1/T-0 renewal reminders. |
+| `EXPIRY_REMINDER_INTERVAL_S` | `3600` | s | How often the daemon checks for due reminders (the cadence is date-based). |
 
 ### Source caching & rate limits
 | Setting | Default | Unit | Meaning |

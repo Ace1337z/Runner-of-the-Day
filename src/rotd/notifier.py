@@ -223,6 +223,59 @@ def render_access_request(chat_id: str, username: str = "", first_name: str = ""
     )
 
 
+# --- subscription expiry reminders (T-7 / T-3 / T-1 / T-0) ------------------
+#
+# Four DMs, one per milestone, keyed on the exact days left so the daily pass is
+# idempotent (see ``Store.due_expiry_reminders``). Each carries a single inline
+# button straight to the renewal/payment URL when ``RENEW_URL`` is configured.
+#
+# milestone -> (button label, template). ``{expiry_date}`` is the subscriber's
+# stored expiry (YYYY-MM-DD, UTC).
+EXPIRY_REMINDERS: dict[int, tuple[str, str]] = {
+    7: ("Renew Now",
+        "⏳ ROTD Subscription Notice\n\n"
+        "Your subscription access will expire in 7 days (on {expiry_date}). "
+        "Renew early to ensure uninterrupted live scanner feeds and catalyst alerts."),
+    3: ("Extend My Access",
+        "⚠️ 3 Days Left on ROTD Access\n\n"
+        "Just 3 days remaining before your subscription lapses. Keep your edge in "
+        "the market—renew today to maintain full access."),
+    1: ("Renew Immediately",
+        "🚨 Final Warning: Expires Tomorrow\n\n"
+        "Your ROTD subscription ends tomorrow. Don't miss tomorrow's premarket "
+        "scans and ignition alerts."),
+    0: ("Reactivate Now",
+        "❌ Subscription Expired\n\n"
+        "Your ROTD subscription has expired and live alerts have been paused. You "
+        "can instantly restore your access by renewing below."),
+}
+
+
+def render_expiry_reminder(milestone: int, expiry_date: str) -> str:
+    """The reminder body for one milestone. Raises for an unknown milestone."""
+    try:
+        _, template = EXPIRY_REMINDERS[int(milestone)]
+    except KeyError as exc:
+        raise ValueError(f"unknown reminder milestone: {milestone}") from exc
+    return template.format(expiry_date=expiry_date)
+
+
+def renew_markup(milestone: int, url: str) -> Optional[dict[str, Any]]:
+    """Inline URL button for a reminder, or ``None`` when no renewal URL is set.
+
+    ``None`` means the message is sent as plain text (no dead button) rather
+    than pointing at a URL that does not exist.
+    """
+    link = (url or "").strip()
+    if not link:
+        return None
+    try:
+        label = EXPIRY_REMINDERS[int(milestone)][0]
+    except KeyError as exc:
+        raise ValueError(f"unknown reminder milestone: {milestone}") from exc
+    return {"inline_keyboard": [[{"text": label, "url": link}]]}
+
+
 def render_subscribers_list(rows: list[dict[str, Any]]) -> str:
     """``/checksubs`` body: every subscriber with status and days left."""
     if not rows:
@@ -344,3 +397,24 @@ class Notifier:
                 log.warning("broadcast failed for %s: %s", chat, err)
                 failed += 1
         return delivered, failed
+
+    def expiry_reminder(self, chat_id: str, milestone: int, expiry_date: str,
+                        url: str = "") -> bool:
+        """Send one subscription-expiry reminder DM and report delivery.
+
+        Unlike the decision pushes this is **per-user**, never fanned out, and it
+        ignores the shadow gate: it is part of the access lifecycle, like the
+        welcome playbook, not a market call. The inline renewal button is added
+        only when a URL is configured. Returns ``True`` when the send succeeded;
+        the caller records the milestone only then, so a failed send is retried
+        on the next pass instead of being silently skipped forever.
+        """
+        text = render_expiry_reminder(milestone, expiry_date)
+        markup = renew_markup(milestone, url)
+        try:
+            self.client.send(text, chat_id=str(chat_id) or None, markup=markup)
+            return True
+        except Exception as exc:  # noqa: BLE001 - one bad chat must not stop the pass
+            log.warning("expiry reminder (%sd) to %s failed: %s",
+                        milestone, chat_id, exc)
+            return False

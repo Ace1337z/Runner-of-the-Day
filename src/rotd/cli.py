@@ -405,6 +405,7 @@ def cmd_listen(cfg: Config, args: argparse.Namespace) -> int:
     store = Store(cfg.db_path)
     rt, clients, tg = _build(cfg, store, use_fake_telegram=not cfg.raw("TELEGRAM_TOKEN"))
     _maintain(cfg, store)  # retention + space reclaim once at startup (item 6)
+    _remind_expiries(cfg, store, tg)  # T-7/T-3/T-1/T-0 renewal DMs at startup
     si0 = session_info()
     # Shadow gate: do NOT push live until the clock completes. We still run cycles
     # (logging) and we DO answer Telegram commands so /setkey keeps working.
@@ -469,6 +470,7 @@ def cmd_listen(cfg: Config, args: argparse.Namespace) -> int:
                 if cfg.take_dirty() or changed:
                     _reload_live(rt, cfg, store, tg)
                 _maintain(cfg, store)
+                _remind_expiries(cfg, store, tg)
             except Exception as exc:  # noqa: BLE001 - one bad command or a network
                 # blip must never kill the daemon (that would loop under Restart=always
                 # and look like multi-second reply delays). Log and keep going.
@@ -507,6 +509,64 @@ def _maintain(cfg: Config, store: Store) -> None:
 
 
 _maintain.last = 0.0  # type: ignore[attr-defined]
+
+
+def send_due_expiry_reminders(cfg: Config, store: Store, tg) -> dict[int, int]:
+    """DM every subscriber at a T-7/T-3/T-1/T-0 milestone, once per milestone.
+
+    The check is date-based (``days_left`` from the stored ``expires_at``), so
+    running it more often is harmless: ``Store.due_expiry_reminders`` skips any
+    milestone already recorded for that expiry, and a milestone is recorded only
+    *after* a successful send. That makes the pass safe to call daily, hourly,
+    and on every daemon restart.
+
+    Per-user sends (never a fan-out) and per-chat isolation: one blocked or
+    deleted chat logs a warning and cannot stop the rest of the cadence.
+
+    Returns ``{milestone: delivered_count}`` for the milestones actually sent.
+    """
+    from .notifier import Notifier
+
+    due = store.due_expiry_reminders()
+    if not due:
+        return {}
+    # FakeTelegram (offline/tests) and the real client share the same ``send``
+    # contract, so the pass exercises the production path in both modes.
+    notifier = Notifier(cfg, tg, store)
+    url = cfg.str("RENEW_URL", "")
+    sent: dict[int, int] = {}
+    for row in due:
+        milestone = int(row["days_left"])
+        if notifier.expiry_reminder(row["chat_id"], milestone, row["expires_at"], url):
+            store.mark_expiry_reminder(row["chat_id"], milestone, row["expires_at"])
+            sent[milestone] = sent.get(milestone, 0) + 1
+        else:
+            # Leave it unmarked: the next pass retries the same milestone.
+            log.warning("expiry reminder (%sd) to %s not delivered; will retry",
+                        milestone, row["chat_id"])
+    if sent:
+        log.info("expiry reminders sent: %s", ", ".join(
+            f"T-{m}: {n}" for m, n in sorted(sent.items(), reverse=True)))
+    return sent
+
+
+def _remind_expiries(cfg: Config, store: Store, tg) -> None:
+    """Run the expiry-reminder pass at most once per interval (never kills the loop)."""
+    import time as _time
+    every = cfg.int("EXPIRY_REMINDER_INTERVAL_S", 3600)
+    now = _time.monotonic()
+    if now - _remind_expiries.last < max(60, every):
+        return
+    _remind_expiries.last = now
+    if not cfg.bool("EXPIRY_REMINDERS", True):
+        return
+    try:
+        send_due_expiry_reminders(cfg, store, tg)
+    except Exception as exc:  # noqa: BLE001 - retention-style job, never fatal
+        log.warning("listen: expiry reminder pass failed: %s", exc)
+
+
+_remind_expiries.last = 0.0  # type: ignore[attr-defined]
 
 
 def _assert_menu(cfg, tg) -> None:

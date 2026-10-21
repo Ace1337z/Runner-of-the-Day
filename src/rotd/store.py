@@ -39,6 +39,10 @@ log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 
+# The subscription-expiry reminder cadence: days-left values that trigger a DM.
+# Order matters for the message text only; the set is used for membership.
+REMINDER_MILESTONES: tuple[int, ...] = (7, 3, 1, 0)
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -203,6 +207,19 @@ CREATE TABLE IF NOT EXISTS seen_users (
     updated_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_seen_username ON seen_users(username);
+
+-- One row per (chat, milestone) reminder already delivered, so the T-7/T-3/T-1/T-0
+-- cadence can run every day (and on every restart) without ever sending the same
+-- milestone twice. A renewal resets nothing: the next subscription cycle has new
+-- expiry dates and therefore new milestones.
+CREATE TABLE IF NOT EXISTS expiry_reminders_sent (
+    chat_id       TEXT NOT NULL,
+    milestone     INTEGER NOT NULL,       -- 7, 3, 1, 0 (days left when sent)
+    expires_at    TEXT NOT NULL,          -- the expiry this reminder belonged to
+    sent_at       TEXT NOT NULL,
+    PRIMARY KEY (chat_id, milestone, expires_at)
+);
+CREATE INDEX IF NOT EXISTS idx_expiry_reminders_chat ON expiry_reminders_sent(chat_id);
 """
 
 
@@ -522,6 +539,84 @@ class Store:
                         "label": str(r["label"] or ""), "days_left": days_left,
                         "is_active": days_left >= 0})
         return out
+
+    # -- expiry reminders ----------------------------------------------------
+    def due_expiry_reminders(self, today: Optional[date] = None) -> list[dict[str, Any]]:
+        """Subscribers whose expiry matches a reminder milestone, with days left.
+
+        Returns one row per (chat, milestone) that is *due now*: a subscriber
+        with exactly ``7``, ``3``, ``1`` or ``0`` days left. A milestone that
+        was already sent for this expiry is excluded, so the daily pass is
+        idempotent and never repeats itself. Rows whose milestone is not due
+        today are omitted entirely (the cadence only fires on the exact day).
+
+        ``days_left`` is a UTC calendar difference, matching ``expires_at`` and
+        the same convention as :meth:`get_all_subscribers`.
+        """
+        day = today or now_utc().date()
+        out: list[dict[str, Any]] = []
+        for r in self.all_subscribers():
+            cid = str(r["chat_id"])
+            # A pre-registered "@handle" row has no numeric id yet; the Bot API
+            # cannot address it, so it can never receive a reminder.
+            if not cid or cid.startswith("@"):
+                continue
+            exp = str(r["expires_at"])
+            try:
+                days_left = (date.fromisoformat(exp) - day).days
+            except ValueError:
+                continue  # malformed expiry: never guess a milestone
+            if days_left not in REMINDER_MILESTONES:
+                continue
+            sent = self.query_one(
+                "SELECT 1 FROM expiry_reminders_sent "
+                "WHERE chat_id=? AND milestone=? AND expires_at=?",
+                (cid, days_left, exp))
+            if sent is not None:
+                continue  # already reminded for this milestone on this expiry
+            out.append({"chat_id": cid, "expires_at": exp, "days_left": days_left,
+                        "label": str(r["label"] or "")})
+        return out
+
+    def mark_expiry_reminder(self, chat_id: str, milestone: int,
+                             expires_at: str) -> None:
+        """Record that ``milestone`` was delivered for one subscriber's expiry.
+
+        Idempotent: re-marking the same triple is a no-op, which keeps a
+        retry-after-crash from ever double-sending.
+        """
+        cid = str(chat_id).strip()
+        if not cid:
+            raise ValueError("expiry reminder: empty chat_id")
+        self.execute(
+            """INSERT OR IGNORE INTO expiry_reminders_sent
+               (chat_id, milestone, expires_at, sent_at) VALUES (?,?,?,?)""",
+            (cid, int(milestone), str(expires_at), _iso(now_utc())))
+
+    def expiry_reminder_sent(self, chat_id: str, milestone: int,
+                             expires_at: str) -> bool:
+        """True when this exact milestone was already delivered."""
+        return self.query_one(
+            "SELECT 1 FROM expiry_reminders_sent "
+            "WHERE chat_id=? AND milestone=? AND expires_at=?",
+            (str(chat_id).strip(), int(milestone), str(expires_at))) is not None
+
+    def last_expiry_reminder(self, chat_id: str,
+                             expires_at: Optional[str] = None) -> Optional[dict[str, Any]]:
+        """The most recent reminder row for a chat (optionally one expiry)."""
+        if expires_at is None:
+            row = self.query_one(
+                "SELECT * FROM expiry_reminders_sent WHERE chat_id=? "
+                "ORDER BY sent_at DESC LIMIT 1", (str(chat_id).strip(),))
+        else:
+            row = self.query_one(
+                "SELECT * FROM expiry_reminders_sent WHERE chat_id=? AND expires_at=? "
+                "ORDER BY sent_at DESC LIMIT 1",
+                (str(chat_id).strip(), str(expires_at)))
+        if row is None:
+            return None
+        return {"chat_id": str(row["chat_id"]), "milestone": int(row["milestone"]),
+                "expires_at": str(row["expires_at"]), "sent_at": str(row["sent_at"])}
 
     # -- seen users / access requests ---------------------------------------
     def record_seen_user(self, chat_id: str, username: str = "",
