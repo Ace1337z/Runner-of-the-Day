@@ -797,7 +797,7 @@ override of the scarcity rule.
 | `AI_PROMPT_FILE` | `methodology_v3.md` | file | System prompt under `prompts/`. |
 | `AI_TEMPERATURE` | `0.0` | float | Auditor temperature (0 required). |
 | `AI_MAX_TOKENS` | `1200` | tokens | Auditor response cap. |
-| `AI_CAUSE_WINDOW_H` | `4` | hours | A news item is FRESH inside this window. |
+| `AI_CAUSE_WINDOW_H` | `14` | hours | A news item is FRESH inside this window (14h keeps premarket/morning releases active through midday). |
 | `CALIBRATION_CLAMP` | `0.25` | float | Max confidence-grade moves a calibration may make. |
 | `DILUTION_BAND_HIGH` | `60` | score | dilution_score ≥ this ⇒ band HIGH. |
 | `DILUTION_BAND_MEDIUM` | `35` | score | dilution_score ≥ this ⇒ band MEDIUM. |

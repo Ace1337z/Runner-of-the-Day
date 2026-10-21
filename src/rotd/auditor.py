@@ -322,7 +322,7 @@ def build_fact_bundle(inp: BundleInputs, cfg: Config) -> dict[str, Any]:
     Every field is emitted (as ``null`` when unknown) so the auditor's closed
     world is explicit and R1/STEP-0 can be checked mechanically.
     """
-    window_h = cfg.float("AI_CAUSE_WINDOW_H", 4)
+    window_h = cfg.float("AI_CAUSE_WINDOW_H", 14)
 
     news_items = []
     for it in (inp.news or {}).get("items", []) or []:

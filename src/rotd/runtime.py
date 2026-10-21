@@ -43,6 +43,10 @@ from .util import as_utc, fmt_ts, now_utc, sha256_hex
 
 log = logging.getLogger(__name__)
 
+# A symbol with no catalyst items yet is re-polled at most this often, so a
+# midday/after-hours press release is still picked up without hammering Finviz.
+REFETCH_EMPTY_S = 180.0
+
 
 def _compact_gates(rep: GateReport) -> dict[str, Any]:
     """Compact gate record for non-board rows (item 6): failures only, no detail.
@@ -88,6 +92,7 @@ class Runtime:
         self._history: dict[str, dict[str, Any]] = {}
         self._vol_history: dict[str, deque] = {}   # (now, cumulative volume) per symbol
         self._catalyst_items: dict[str, list[dict[str, Any]]] = {}
+        self._catalyst_fetched_at: dict[str, datetime] = {}  # last poll per symbol
         self._first_seen: dict[str, datetime] = {}
         self._last_touch: dict[str, datetime] = {}
         self._sec_tickers: Optional[dict[str, dict[str, Any]]] = None
@@ -102,6 +107,7 @@ class Runtime:
             self._history.clear()
             self._vol_history.clear()
             self._catalyst_items.clear()
+            self._catalyst_fetched_at.clear()
             self._first_seen.clear()
             self._last_touch.clear()
             self._data_grades = []
@@ -596,19 +602,25 @@ class Runtime:
         """Fetch fresh news/headlines + SEC filings for the audit candidates.
 
         Populates ``self._catalyst_items[symbol]`` with items inside
-        ``AI_CAUSE_WINDOW_H`` (Feature Wiring 4). Runs once per day per symbol
-        (the per-day cache is cleared by ``_ensure_day``) so the Finviz rate
-        budget is respected. Fail soft: any source error leaves the symbol with
-        no items — the auditor sees an empty bundle, never a crash.
+        ``AI_CAUSE_WINDOW_H`` (Feature Wiring 4). A symbol that already has
+        items is done, but a symbol that came back empty is re-polled at most
+        every ``REFETCH_EMPTY_S`` seconds — an earlier (pre-market) empty poll
+        must not lock the symbol out of a midday or after-hours press release.
+        Fail soft: any source error leaves the symbol with no items — the
+        auditor sees an empty bundle, never a crash.
         """
         fv = self.clients.get("finviz")
         sec = self.clients.get("sec")
         if fv is None and sec is None:
             return
-        window_h = self.cfg.float("AI_CAUSE_WINDOW_H", 4)
+        window_h = self.cfg.float("AI_CAUSE_WINDOW_H", 14)
         for sym in symbols:
-            if sym in self._catalyst_items:
-                continue  # already fetched this trading day
+            if self._catalyst_items.get(sym):
+                continue  # already fetched items for this symbol
+            last_f = self._catalyst_fetched_at.get(sym)
+            if last_f and (now - last_f).total_seconds() < REFETCH_EMPTY_S:
+                continue  # wait 3m before re-polling Finviz for an empty symbol
+            self._catalyst_fetched_at[sym] = now
             items: list[dict[str, Any]] = []
             if fv is not None:
                 try:
@@ -766,9 +778,10 @@ class Runtime:
         top_n = self.cfg.int("CATALYST_TOP_N_EARLY", 10)
         audit_syms = [s.symbol for s in rk.day_ranked[:top_n]]
         out: dict[str, Any] = {"audited": [], "verdicts": {}}
-        # Fetch fresh news + filings for the audit candidates (once per day per
-        # symbol; the per-day cache is cleared by _ensure_day). Only when a model
-        # is configured — without one the auditor is rules-only and needs no text.
+        # Fetch fresh news + filings for the audit candidates (empty symbols are
+        # re-polled every REFETCH_EMPTY_S so a midday PR is still seen). Only
+        # when a model is configured — without one the auditor is rules-only
+        # and needs no text.
         if self.catalyst.configured():
             self._fetch_catalyst_items(audit_syms, now)
         for sym in audit_syms:
@@ -778,6 +791,19 @@ class Runtime:
             fs = features_by.get(sym)
             if not (rec and sc and rep and fs):
                 continue
+            # Fast path for the Stage-1 CATALYST bridge: classify the fetched
+            # headlines/filings so per-item verdicts land in the `catalysts`
+            # table and best_score() has a 0..100 number even when the full
+            # report audit has not (yet) produced a catalyst_quality.
+            for item in self._catalyst_items.get(sym, [])[:3]:
+                iid = str(item.get("id", ""))
+                hl = item.get("headline") or item.get("summary") or ""
+                kd = item.get("kind", "news")
+                if iid and hl:
+                    if async_mode:
+                        self.catalyst.classify_async(sym, iid, kd, hl)
+                    else:
+                        self.catalyst.classify(sym, iid, kd, hl)
             inp = self.build_bundle_inputs(rec, sc, rep, fs, mode, now,
                                            gate_passed=rep.passed)
             if async_mode:
@@ -861,8 +887,10 @@ def _is_half(mode: str, day: date) -> bool:
 def _row_age_min(date_str: Optional[str], now: datetime) -> Optional[float]:
     """Minutes since a news/filing row's date string (None when unparseable).
 
-    Handles ISO-8601 (SEC/Finviz export) and the quote-page format
-    ``Jul-15-26 08:30AM`` (ET, 2-digit year) the per-ticker news feed uses.
+    Handles ISO-8601 (SEC/Finviz export), the quote-page format
+    ``Jul-15-26 08:30AM`` (ET, 2-digit year) and Finviz Elite's same-day rows
+    ``Today 08:00AM`` / bare ``08:00AM`` (ET). A same-day time in the future
+    relative to ``now`` belongs to yesterday, so it rolls back a day.
     """
     if not date_str:
         return None
@@ -872,6 +900,17 @@ def _row_age_min(date_str: Optional[str], now: datetime) -> Optional[float]:
         return max(0.0, (now - as_utc(dt)).total_seconds() / 60.0)
     except ValueError:
         pass
+    # Finviz "Today 08:00AM" or bare "08:00AM" (same-day rows)
+    m_today = re.match(r"(?:[Tt]oday\s+)?(\d{1,2}):(\d{2})\s*([AaPp][Mm])$", s)
+    if m_today:
+        from .util import ET
+        hh_t, mm_t, ap_t = m_today.groups()
+        hour_t = int(hh_t) % 12 + (12 if ap_t.lower() == "pm" else 0)
+        now_et = now.astimezone(ET)
+        dt_t = now_et.replace(hour=hour_t, minute=int(mm_t), second=0, microsecond=0)
+        if dt_t > now_et:
+            dt_t -= timedelta(days=1)
+        return max(0.0, (now - dt_t).total_seconds() / 60.0)
     m = re.match(
         r"([A-Za-z]{3})-(\d{1,2})-(\d{2})\s+(\d{1,2}):(\d{2})\s*([AaPp][Mm])", s)
     if not m:
