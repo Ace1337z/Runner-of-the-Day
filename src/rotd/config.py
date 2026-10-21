@@ -125,7 +125,7 @@ _GLOBAL: list[Setting] = [
 
     # --- scoring weights (section 9.1) ---
     Setting("W_TAPE", "30", "points", "Tape-ignition weight (Stage-1 score)."),
-    Setting("W_CATALYST", "25", "points", "Catalyst weight (Stage-1 score)."),
+    Setting("W_CATALYST", "5", "points", "Catalyst weight (Stage-1 score)."),
     Setting("W_FUEL", "20", "points", "Fuel weight (Stage-1 score)."),
     Setting("W_STRUCTURE", "15", "points", "Structure weight (Stage-1 score)."),
     Setting("W_CONTEXT", "10", "points", "Context weight (Stage-1 score)."),

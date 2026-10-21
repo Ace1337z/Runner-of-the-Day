@@ -1,8 +1,17 @@
 """Scoring, ranking and supply (build prompt §9).
 
 Stage-1 score (§9.1): a weighted sum of five component scores, each 0..1 scaled
-by its weight (``W_TAPE`` 30, ``W_CATALYST`` 25, ``W_FUEL`` 20, ``W_STRUCTURE``
-15, ``W_CONTEXT`` 10), for a 0..100 total. Only gated names are scored.
+by its weight (``W_TAPE`` 30, ``W_CATALYST`` 5, ``W_FUEL`` 20, ``W_STRUCTURE``
+15, ``W_CONTEXT`` 10 — an 80-point raw scale), rescaled to 0..100 for the total.
+Only gated names are scored.
+
+The catalyst weight is deliberately small: the catalyst number comes from an LLM
+and is noisy, so a low reading on a pure momentum/technical runner must not act
+as a 25% anchor pinning the score below ``ARM_MIN_SCORE`` until the move has
+already topped out. At 5 points a weak catalyst costs almost nothing, while a
+strong one still adds a full 5 points (6.25 after rescaling) — enough to matter,
+not enough to veto. Because the score is normalized against the *active* weight,
+the 80-point scale rescales cleanly to 0..100 and no threshold changed.
 
 The score is **uncalibrated** in Stage 1 — 85 has no probability meaning; it is a
 starting threshold to be tuned from the MISS REPORT.

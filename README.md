@@ -759,10 +759,14 @@ is not one of these: it is always enforced in the state machine.
 | Setting | Default | Unit | Meaning |
 |---|---|---|---|
 | `W_TAPE` | `30` | points | Tape-ignition weight. |
-| `W_CATALYST` | `25` | points | Catalyst weight. |
+| `W_CATALYST` | `5` | points | Catalyst weight. Small on purpose: the LLM catalyst number is noisy, so a low reading must not anchor a pure momentum runner below `ARM_MIN_SCORE`. |
 | `W_FUEL` | `20` | points | Fuel weight. |
 | `W_STRUCTURE` | `15` | points | Structure weight. |
 | `W_CONTEXT` | `10` | points | Context weight. |
+
+The defaults sum to an **80-point raw scale** (30 + 5 + 20 + 15 + 10), rescaled
+to 0..100 at scoring time, so the thresholds below are unchanged by the catalyst
+weight.
 
 Components with no data are excluded from the weighted average and the remaining
 weights are renormalized (active-weight scaling); a missing optional input cannot

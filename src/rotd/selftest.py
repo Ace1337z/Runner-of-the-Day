@@ -239,6 +239,20 @@ def _score_checks(cfg: Config, results, step) -> None:
     sc = S.score_candidate(rec, fs, rep, cfg, "PRE")
     _check(0 < sc.score <= 100, f"score out of range: {sc.score}", results,
            "score in range 0..100")
+    # Catalyst must stay light (5/80): a heavy anchor here pinned pure momentum
+    # runners below ARM_MIN_SCORE until the move had already topped out. Assert
+    # the weight and the resulting 80-point raw scale so a revert to 25 fails loud.
+    w_sum = sum(cfg.float(f"W_{k}", 0.0) for k in
+                ("TAPE", "CATALYST", "FUEL", "STRUCTURE", "CONTEXT"))
+    _check(cfg.float("W_CATALYST", 0.0) == 5.0,
+           f"W_CATALYST is {cfg.float('W_CATALYST', 0.0)}, expected 5",
+           results, "scoring: catalyst weight stays light (5)")
+    _check(w_sum == 80.0, f"weight total is {w_sum}, expected the 80-point raw scale",
+           results, "scoring: weights sum to the 80-point raw scale")
+    _check(sc.components["CATALYST"].weight == 5.0
+           and sc.components["CATALYST"].points <= 5.0,
+           "catalyst contributed more than its 5 raw points", results,
+           "scoring: catalyst contributes at most 5 raw points")
     rk = S.rank([sc], cfg)
     _check(rk.rotd is not None and rk.rotd.symbol == "RUN", "runner not selected",
            results, "top qualified candidate becomes ROTD")

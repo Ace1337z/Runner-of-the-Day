@@ -59,3 +59,31 @@ def test_registry_default_has_no_blank_numeric_unit():
     for key in ("MAX_PRICE", "ALERT_BUDGET_PER_DAY", "ROTD_MIN_SCORE",
                 "CHASE_CAP_PCT", "RUNNER_LIST_PCT"):
         assert BY_KEY[key].unit, f"{key} must declare a unit"
+
+
+def test_catalyst_weight_default_stays_light_on_the_80_point_scale(cfg: Config):
+    """W_CATALYST must default to 5 so a future deploy cannot re-anchor the score.
+
+    At 25 the noisy LLM catalyst number acted as a 25% anchor, pinning pure
+    momentum runners below ARM_MIN_SCORE until the move had topped out. The five
+    weights now sum to an 80-point raw scale that scoring.py rescales to 0..100,
+    so this change needs no threshold edits — which is exactly why a silent
+    revert would be easy to miss.
+    """
+    assert cfg.float("W_CATALYST") == 5.0
+    weights = {k: cfg.float(f"W_{k}") for k in
+               ("TAPE", "CATALYST", "FUEL", "STRUCTURE", "CONTEXT")}
+    assert weights == {"TAPE": 30.0, "CATALYST": 5.0, "FUEL": 20.0,
+                       "STRUCTURE": 15.0, "CONTEXT": 10.0}
+    assert sum(weights.values()) == 80.0
+
+
+def test_shipped_env_template_pins_the_catalyst_weight():
+    """config.env.example is the deployment template; it must not reintroduce 25."""
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parents[1] / "config.env.example").read_text(
+        encoding="utf-8")
+    active = [ln.strip() for ln in text.splitlines()
+              if ln.strip().startswith("W_CATALYST=")]
+    assert active == ["W_CATALYST=5"], f"template pins {active!r}"
