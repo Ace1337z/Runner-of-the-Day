@@ -18,7 +18,14 @@
 //    DEAD SETUP   more than 15% below high of day  gates.py backside_of_hod()
 //    NO CHASING   entry within 25% of armed level  CHASE_CAP_PCT
 //    STRUCTURE    at least 4.0 of 15 points        MIN_STRUCTURE_SCORE
-//    SCORES       ARM 68 / IGNITION 70 / ROTD 60  config.py defaults
+//
+//  The scanner's *score* gates (ARM 68 / IGNITION 70 / ROTD 60) are NOT
+//  reproduced here. Those scores are built partly from data TradingView cannot
+//  see (float, short interest, 3m volume, 10m dollar volume, LLM catalyst), so
+//  typing the numbers in would imitate a verdict this chart cannot compute.
+//  The Telegram alert carries the scanner's real verdict - trust that. This
+//  chart answers a different, exact question: "does the setup still look valid
+//  right now, in price terms?"
 //
 //  Every signal is gated on barstate.isconfirmed, and daily high/low use the
 //  documented high[1] + lookahead_on idiom, so a stop never moves after the fact.
@@ -26,15 +33,22 @@
 indicator("ROTD Companion [scanner-aligned]", shorttitle="ROTD", overlay = true, max_labels_count = 500, max_lines_count = 200, max_boxes_count = 100)
 
 // =============================================================================
-// 1 . INPUTS  -  keep group 1 equal to your config.env
+// 1 . INPUTS
+//
+//  NO SCORE THRESHOLDS ARE CONFIGURED HERE ON PURPOSE.
+//  ARM_MIN_SCORE / IGNITION_THRESHOLD / ROTD_MIN_SCORE are computed by the
+//  scanner from data this chart cannot see (float, short interest, 3m volume,
+//  10m dollar volume, LLM catalyst). Typing those numbers in would make the
+//  chart imitate a score it is not actually calculating. So the chart does not
+//  gate on score at all: it mirrors only the gates it can reproduce exactly,
+//  which are all price/geometry, plus a price-based strength check below.
+//  The Telegram alert already tells you the scanner's verdict - trust that.
 // =============================================================================
-gCore = "1 . Scanner thresholds (match config.env)"
-armMinScore  = input.float(68.0, "ARM_MIN_SCORE",              minval = 0, maxval = 100, step = 1, group = gCore, tooltip = "Score needed to be ARMED (loaded, waiting for the trigger).")
-ignThreshold = input.float(70.0, "IGNITION_THRESHOLD",         minval = 0, maxval = 100, step = 1, group = gCore, tooltip = "Score must hold here for the trigger. This is the Telegram alert you received.")
-rotdMinScore = input.float(60.0, "ROTD_MIN_SCORE",             minval = 0, maxval = 100, step = 1, group = gCore, tooltip = "Absolute floor. Below this the scanner would not show the name at all.")
-chaseCapPct  = input.float(25.0, "CHASE_CAP_PCT %",            minval = 0,             step = 0.5, group = gCore, tooltip = "Never enter more than this % above the armed level. This is the anti-FOMO rule.")
-maxDdHodPct  = input.float(15.0, "MAX_DRAWDOWN_FROM_HOD_PCT",  minval = 1,             step = 0.5, group = gCore, tooltip = "More than this below the high of day = the setup is dead (backside of HOD). No entries, ever.")
-minStructPts = input.float(4.0,  "MIN_STRUCTURE_SCORE / 15",   minval = 0, maxval = 15, step = 0.5, group = gCore, tooltip = "Structure floor. Volume alone can never carry a rolling-over chart into a trade.")
+gCore = "1 . Scanner gates (price-based, match config.env)"
+chaseCapPct  = input.float(25.0, "CHASE_CAP_PCT %",            minval = 0,             step = 0.5, group = gCore, tooltip = "Never enter more than this % above the armed level. This is the anti-FOMO rule. Pure price geometry - matches the scanner exactly.")
+maxDdHodPct  = input.float(15.0, "MAX_DRAWDOWN_FROM_HOD_PCT",  minval = 1,             step = 0.5, group = gCore, tooltip = "More than this below the high of day = the setup is dead (backside of HOD). No entries, ever. Pure price - matches the scanner exactly.")
+minStructPts = input.float(4.0,  "MIN_STRUCTURE_SCORE / 15",   minval = 0, maxval = 15, step = 0.5, group = gCore, tooltip = "Structure floor. All four of its inputs are visible on the chart (new high, gap, 52w-low distance, HOD drawdown), so this reconciles with the scanner.")
+requireVol   = input.bool(true, "Require normal-or-better volume", group = gCore, tooltip = "Blocks a run on dead volume. Uses this bar vs the 20-bar average, so it needs no server numbers.")
 
 gTf = "2 . Timeframes"
 structTf  = input.timeframe("5", "Structure timeframe", group = gTf, tooltip = "5-minute for the EMA structure while you execute on 1-minute. Leave as is unless you know why to change it.")
@@ -318,12 +332,19 @@ stopHit      = lostStop and not cleanExit and barstate.isconfirmed
 
 // =============================================================================
 // 9 . TRADE GATES  -  the "should I take this at all?" checklist
-// =============================================================================
-// Absolute floor first (ROTD_MIN_SCORE), then the arming hurdle. A name can never
-// be tradeable while it is below either one - same two-step the scanner applies.
-aboveFloor = not na(tapeScore) and tapeScore >= rotdMinScore
-scoreOk    = not na(tapeScore) and tapeScore >= armMinScore
-tradeable  = inRun and not backside and structOk and not chaseBlocked and aboveFloor and scoreOk
+//
+//  Deliberately NOT score-based. Every term below is either price geometry or
+//  an observable fact on this chart, so it cannot drift from the server:
+//    inRun          - above VWAP and 9 EMA >= 21 EMA
+//    not backside   - within 15% of the high of day
+//    structOk       - >= 4.0 of 15 structure points (all inputs chart-visible)
+//    not chaseBlocked - within 25% of the armed level
+//    tapeAlive      - above the 9 EMA and volume at least normal
+//  The scanner's own score verdict arrives in the Telegram alert; that is the
+//  authority. This chart confirms the setup still looks the same right now.
+buyerAbove = emaF > 0 and close >= emaF
+tapeAlive  = buyerAbove and (not requireVol or na(volSpike) or volSpike >= 1.0)
+tradeable  = inRun and not backside and structOk and not chaseBlocked and tapeAlive
 
 // ENTRY = a fresh run turning up with every gate green. Chart twin of the push.
 entryTrig = tradeable and runStart and barstate.isconfirmed
@@ -375,13 +396,9 @@ if barstate.islast and showHud
     else if tradeable
         state := "TRADEABLE"
     stateColor = tradeable ? color.new(color.green, 30) : color.new(color.red, 30)
-    scoreColor = color.red
-    if na(tapeScore)
-        scoreColor := color.gray
-    else if tapeScore >= ignThreshold
-        scoreColor := color.lime
-    else if tapeScore >= armMinScore
-        scoreColor := color.yellow
+    // Tape score is shown as INFORMATION, not as a gate - it is missing inputs
+    // the scanner has, so it cannot decide anything on its own.
+    scoreColor = na(tapeScore) ? color.gray : tapeScore >= 60 ? color.lime : color.orange
     table.cell(hud, 0, 0, "ROTD COMPANION", text_color = color.white, bgcolor = color.new(color.blue, 30), text_size = size.small)
     table.cell(hud, 1, 0, state, text_color = color.white, bgcolor = stateColor, text_size = size.small)
     table.cell(hud, 0, 1, "Tape score", text_size = size.small)
@@ -412,9 +429,9 @@ if barstate.islast and showHud
     table.cell(hud, 0, 11, "TP trigger", text_size = size.small)
     tpText = ">= " + str.tostring(tpHardStretch, "#") + "% above VWAP"
     table.cell(hud, 1, 11, tpText, text_size = size.small, text_color = color.lime)
-    table.cell(hud, 0, 12, "Score floor", text_size = size.small)
-    floorText = str.format("ARM {0} / IGN {1}", str.tostring(armMinScore, "#"), str.tostring(ignThreshold, "#"))
-    table.cell(hud, 1, 12, floorText, text_size = size.small)
+    table.cell(hud, 0, 12, "Gate mode", text_size = size.small)
+    gateText = "price-only (no score gate)"
+    table.cell(hud, 1, 12, gateText, text_size = size.small, text_color = color.gray)
 
 // =============================================================================
 // 13 . ALERTS  (webhook-ready; never fires mid-bar)

@@ -22,15 +22,16 @@ If you read nothing else, read these.
 The top-right panel's first cell decides everything:
 
 ```
-✅ TRADEABLE        →  you may trade
-⛔ BACKSIDE OF HOD  →  setup is dead. Skip.
-⛔ TOO EXTENDED     →  >25% above armed level. Skip.
-⛔ BELOW VWAP       →  scanner aborted this. Skip.
-⛔ WEAK STRUCTURE   →  chart is broken. Skip.
-⏳ WAIT             →  right stock, wrong moment. Wait.
+TRADEABLE                 (green)  →  you may trade
+NO - BACKSIDE OF HOD      (red)    →  setup is dead. Skip.
+NO - TOO EXTENDED         (red)    →  >25% above armed level. Skip.
+NO - BELOW VWAP           (red)    →  scanner aborted this. Skip.
+NO - WEAK STRUCTURE       (red)    →  chart is broken. Skip.
+WAIT                      (red)    →  right stock, wrong moment. Wait.
 ```
 
-**Any ⛔ means no trade.** This single rule prevents most losing runner trades.
+**Anything other than TRADEABLE means no trade.** This single rule prevents most
+losing runner trades.
 
 ### 2. Enter on the aqua ▲ arrow — and only if you're close
 
@@ -86,22 +87,61 @@ Exit on either:
 5. **Timeframe: 1-minute** ← important
 6. Save it as a chart layout so next time is two clicks
 
-### Match settings to your server
+**That's it - there is nothing to type in, and no server settings to copy.**
+The indicator deliberately does not use score thresholds - see
+[why there is no score gate](#why-there-is-no-score-gate).
 
-Indicator **Settings → group 1** must equal your `config.env`:
+### The only 3 settings you might touch
 
-| Setting | Default |
+| Setting | Default | Change it only if... |
+|---|---|---|
+| `CHASE_CAP_PCT` | 25 | you changed it in `config.env` |
+| `MAX_DRAWDOWN_FROM_HOD_PCT` | 15 | you changed it in `config.env` |
+| `MIN_STRUCTURE_SCORE` | 4.0 | you changed it in `config.env` |
+
+These are the only gates the chart can reproduce **exactly** - they are pure
+price geometry, so they cannot drift from the scanner. Leave them alone unless
+you actually changed your server.
+
+Leave **Structure timeframe = 5**. EMAs are read from 5-minute and drawn on your
+1-minute chart; 1-minute EMAs are too noisy to define a trend.
+
+---
+
+## Why there is no score gate
+
+The scanner gates on score: **ARM 68 / IGNITION 70 / ROTD 60**. The chart does
+**not** - and that is deliberate.
+
+Those scores are built partly from data TradingView cannot see:
+
+- float and short interest
+- 3-minute volume and 10-minute dollar volume
+- the LLM catalyst verdict
+
+Typing 68/70/60 into the indicator would make it *imitate a verdict it cannot
+compute* - and you would have to retype them every time you tuned `config.env`.
+Worse, it would quietly disagree with the server while looking authoritative.
+
+**So the division of labour is:**
+
+| Question | Who answers it |
 |---|---|
-| `ARM_MIN_SCORE` | 68 |
-| `IGNITION_THRESHOLD` | 70 |
-| `ROTD_MIN_SCORE` | 60 |
-| `CHASE_CAP_PCT` | 25 |
-| `MAX_DRAWDOWN_FROM_HOD_PCT` | 15 |
-| `MIN_STRUCTURE_SCORE` | 4.0 |
+| Is this a real setup worth alerting? | **The scanner** (Telegram) |
+| Does it still look valid *right now*, in price terms? | **This chart** |
 
-These already match the live system. **Only change them if you change `config.env`** — otherwise the chart and Telegram will disagree.
+The chart's job is to catch a setup **dying between the alert and your entry** -
+and every check it uses for that is a fact you can see:
 
-Leave **Structure timeframe = 5**. EMAs are read from 5-minute and drawn on your 1-minute chart; 1-minute EMAs are too noisy to define a trend.
+| Gate | Exact? |
+|---|---|
+| Close below VWAP | Yes |
+| More than 15% below high of day | Yes |
+| More than 25% above armed level | Yes |
+| Structure at least 4.0 / 15 | Yes - all 4 inputs are chart-visible |
+| Above the 9 EMA + normal volume | Yes - observable facts |
+
+Nothing above needs typing, and nothing can drift from the server.
 
 ---
 
@@ -140,7 +180,7 @@ Leave **Structure timeframe = 5**. EMAs are read from 5-minute and drawn on your
 
 | Field | Use it for |
 |---|---|
-| **Tape score** | 0–100 momentum. Green ≥70, yellow ≥68, red below |
+| **Tape score** | 0–100 momentum, **for information only** — not a gate |
 | **Mode** | TREND (loose trail) or CLIMAX (tight trail) |
 | **Hard stop / Stop in use** | Where your order goes |
 | **Risk %** | Sizing — your loss to the stop |
@@ -192,11 +232,14 @@ Not perfect — but uncatchable as a loser.
 
 ## Limitations — read this
 
-- **The score is not the scanner's.** Float, short interest, 3-minute volume,
-  10-minute dollar volume and the LLM catalyst verdict are not available on
-  TradingView. Expect **±6 points** difference.
-- **What matches exactly is the gate logic** — VWAP abort, 15% HOD limit, 25%
-  chase cap, structure floor. Those are what keep you out of bad trades.
+- **The chart does not gate on score at all**, so there is nothing to retype and
+  nothing that can drift. Score thresholds live on the server only.
+- **The tape score shown is not the scanner's.** Float, short interest, 3-minute
+  volume, 10-minute dollar volume and the LLM catalyst verdict are not available
+  on TradingView. Expect **±6 points** — read it as a mood indicator, not a verdict.
+- **Every gate on the chart matches the scanner exactly** — VWAP abort, 15% HOD
+  limit, 25% chase cap, structure floor, 9 EMA + volume. There is no approximate
+  gate left, because the approximate one (score) was removed.
 - **RVOL needs history.** Shows `building…` until 2 prior sessions exist. Normal.
 - **The trail is deliberately wide (11%).** On a quiet name that's a large stop.
   Always check Risk % and size accordingly.
