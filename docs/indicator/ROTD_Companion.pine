@@ -228,7 +228,10 @@ emaAligned = not na(emaF) and not na(emaS) and emaF >= emaS * 0.995
 inRun      = aboveVwap and emaAligned
 
 runStart  = inRun and not inRun[1]
-barsInRun = ta.barssince(runStart)
+// Explicit counter rather than ta.barssince(), for the same reason as the
+// cooldowns in section 8: no na handling, no ambiguity.
+var int barsInRun = 0
+barsInRun := runStart ? 0 : barsInRun + 1
 
 // The armed level is where the run began - CHASE_CAP_PCT is measured from it.
 var float armedLevel = na
@@ -286,7 +289,7 @@ vwapStretch  = vwapVal > 0 ? (high - vwapVal) / vwapVal * 100.0 : 0.0
 barRange     = high - low
 upperWickPct = barRange > 0 ? (high - close) / barRange * 100.0 : 0.0
 atrRef       = nz(atrS, barRange)
-enoughBars   = nz(barsInRun, 0) >= 2
+enoughBars   = barsInRun >= 2
 
 // One-shot flags per run: reset when a new run starts.
 var bool blowOffUsed = false
@@ -327,10 +330,18 @@ lostStop     = not na(effectiveStop[1]) and close < effectiveStop[1]
 lostVwap     = ta.crossunder(close, vwapVal)
 
 exitRaw      = runExtended and (lostStop or lostVwap) and barstate.isconfirmed
-barsSinceExit = ta.barssince(exitRaw[1])
-cleanExit    = exitRaw and (na(barsSinceExit) or barsSinceExit > 8) and not tpRaw
-barsSinceTp  = ta.barssince(tpRaw[1])
-cleanTp      = tpRaw and (na(barsSinceTp) or barsSinceTp > 6) and not cleanExit
+// Cooldowns use explicit bar counters instead of ta.barssince(): barssince()
+// returns na when a condition has never fired, and it is not reliable for more
+// than one distinct condition in the same script.
+// IMPORTANT: the counter counts bars since the last ACCEPTED signal, not since
+// the last raw condition. Resetting on the raw condition would pin it at 0 while
+// the condition persisted, permanently suppressing the next valid signal.
+var int barsSinceExit = 999
+var int barsSinceTp   = 999
+cleanExit = exitRaw and barsSinceExit > 8 and not tpRaw
+cleanTp   = tpRaw and barsSinceTp > 6 and not cleanExit
+barsSinceExit := cleanExit ? 0 : barsSinceExit + 1
+barsSinceTp   := cleanTp ? 0 : barsSinceTp + 1
 // The chart's "get out NOW" marker: stop breached without the extended-run
 // filter, so a first-bar breakdown is still flagged rather than silently ignored.
 stopHit      = lostStop and not cleanExit and barstate.isconfirmed
