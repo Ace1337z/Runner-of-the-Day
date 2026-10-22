@@ -9,7 +9,7 @@ open the chart and this tells you three things:
 | **Where does my stop go?** | Orange **"Stop in use"** line |
 | **Where do I take profit?** | Lime ▼ **TP** triangles |
 
-Source: [`ROTD_Companion.pine`](ROTD_Companion.pine)
+Source: [`ROTD_Companion.pine`](ROTD_Companion.pine) · **Won't compile?** → [Troubleshooting](TROUBLESHOOTING.md)
 
 ---
 

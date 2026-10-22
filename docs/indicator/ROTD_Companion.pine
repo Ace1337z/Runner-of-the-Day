@@ -88,11 +88,13 @@ enableAlerts = input.bool(true, "alert() calls (for webhook bots)", group = gSho
 // 2 . CORE LEVELS
 // =============================================================================
 // EMAs on the structure timeframe, mapped back to the chart.
-[emaF, emaS, atrS] = request.security(syminfo.tickerid, structTf, [ta.ema(close, emaFastLen), ta.ema(close, emaSlowLen), ta.atr(atrLen)])
+emaF = request.security(syminfo.tickerid, structTf, ta.ema(close, emaFastLen))
+emaS = request.security(syminfo.tickerid, structTf, ta.ema(close, emaSlowLen))
+atrS = request.security(syminfo.tickerid, structTf, ta.atr(atrLen))
 
 // -- VWAP built explicitly (Sum typical x vol / Sum vol) so the deviation bands
 //    are exact and the script never depends on an unverified ta.vwap overload.
-newDay = ta.change(time("D")) != 0
+newDay = ta.change(dayofmonth) != 0
 var float cumPV = 0.0   // Sum typical*volume
 var float cumV  = 0.0   // Sum volume
 var float cumPP = 0.0   // Sum typical^2*volume  (for the variance)
@@ -115,8 +117,10 @@ band3Up = vwapVal + vwapSd * 3.0
 // -- Day high / low, non-repainting: high[1] + lookahead_on is TradingView's
 //    documented idiom for "last CONFIRMED daily value", so a stop never moves
 //    after the fact. On a daily chart the bar's own high/low is the correct value.
-[dPrevHigh, dPrevLow, dPrevClose] = request.security(syminfo.tickerid, "D", [high[1], low[1], close[1]], lookahead = barmerge.lookahead_on)
-onDaily  = timeframe.in_seconds(timeframe.period) >= timeframe.in_seconds("D")
+dPrevHigh  = request.security(syminfo.tickerid, "D", high[1],  lookahead = barmerge.lookahead_on)
+dPrevLow   = request.security(syminfo.tickerid, "D", low[1],   lookahead = barmerge.lookahead_on)
+dPrevClose = request.security(syminfo.tickerid, "D", close[1], lookahead = barmerge.lookahead_on)
+onDaily  = timeframe.isdaily or timeframe.isweekly or timeframe.ismonthly
 dayHigh  = onDaily ? high : math.max(nz(dPrevHigh, high), high)
 dayLow   = onDaily ? low  : math.min(nz(dPrevLow, low), low)
 prevClose = onDaily ? close[1] : nz(dPrevClose, close)
@@ -195,9 +199,10 @@ tapeScore = tP.size() > 0 ? tP.avg() * 100.0 : na
 ddFromHod = dayHigh > 0 ? (dayHigh - close) / dayHigh * 100.0 : na
 newHighFlag = close >= dayHigh ? 1.0 : 0.0
 gapPct = prevClose > 0 ? (open - prevClose) / prevClose * 100.0 : na
-// Distance from the 52-week low. Weekly[1] + lookahead_on = the last CONFIRMED
-// weekly bar, so this slow filter never repaints on the live week.
-w52Low = request.security(syminfo.tickerid, "W", ta.lowest(low, 52)[1], lookahead = barmerge.lookahead_on)
+// Distance from the 52-week low. This is a slow structural filter, not a stop,
+// so a small intra-week drift is harmless - and keeping the construct plain
+// (no subscript on a request result) is worth more than the precision.
+w52Low = request.security(syminfo.tickerid, "W", ta.lowest(low, 52), lookahead = barmerge.lookahead_off)
 dist52wLow = not na(w52Low) and w52Low > 0 ? (close - w52Low) / w52Low * 100.0 : na
 
 sP = array.new<float>()
