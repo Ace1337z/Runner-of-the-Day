@@ -1,0 +1,432 @@
+//@version=6
+// =============================================================================
+//  ROTD COMPANION  -  chart-side execution tool for the ROTD scanner
+// =============================================================================
+//  Use this when Telegram sends:  ROTD IGNITION - $XYZ
+//  It answers three questions on the chart:
+//      1. WHERE DO I ENTER?
+//      2. WHERE DOES MY STOP GO?
+//      3. WHERE DO I TAKE PROFIT?
+//
+//  This is NOT a signal generator. It does not find runners - the scanner does.
+//  It is also NOT the scanner: trading-style data such as float, short interest,
+//  3-minute volume and the LLM catalyst verdict are not visible on TradingView,
+//  so the on-chart Tape score can differ from Telegram by about +/-6 points.
+//  What matches the scanner EXACTLY is the gate logic:
+//
+//    ABORT        close below VWAP                 state_machine.py check_aborts()
+//    DEAD SETUP   more than 15% below high of day  gates.py backside_of_hod()
+//    NO CHASING   entry within 25% of armed level  CHASE_CAP_PCT
+//    STRUCTURE    at least 4.0 of 15 points        MIN_STRUCTURE_SCORE
+//    SCORES       ARM 68 / IGNITION 70 / ROTD 60  config.py defaults
+//
+//  Every signal is gated on barstate.isconfirmed, and daily high/low use the
+//  documented high[1] + lookahead_on idiom, so a stop never moves after the fact.
+// =============================================================================
+indicator("ROTD Companion [scanner-aligned]", shorttitle="ROTD", overlay = true, max_labels_count = 500, max_lines_count = 200, max_boxes_count = 100)
+
+// =============================================================================
+// 1 . INPUTS  -  keep group 1 equal to your config.env
+// =============================================================================
+gCore = "1 . Scanner thresholds (match config.env)"
+armMinScore  = input.float(68.0, "ARM_MIN_SCORE",              minval = 0, maxval = 100, step = 1, group = gCore, tooltip = "Score needed to be ARMED (loaded, waiting for the trigger).")
+ignThreshold = input.float(70.0, "IGNITION_THRESHOLD",         minval = 0, maxval = 100, step = 1, group = gCore, tooltip = "Score must hold here for the trigger. This is the Telegram alert you received.")
+rotdMinScore = input.float(60.0, "ROTD_MIN_SCORE",             minval = 0, maxval = 100, step = 1, group = gCore, tooltip = "Absolute floor. Below this the scanner would not show the name at all.")
+chaseCapPct  = input.float(25.0, "CHASE_CAP_PCT %",            minval = 0,             step = 0.5, group = gCore, tooltip = "Never enter more than this % above the armed level. This is the anti-FOMO rule.")
+maxDdHodPct  = input.float(15.0, "MAX_DRAWDOWN_FROM_HOD_PCT",  minval = 1,             step = 0.5, group = gCore, tooltip = "More than this below the high of day = the setup is dead (backside of HOD). No entries, ever.")
+minStructPts = input.float(4.0,  "MIN_STRUCTURE_SCORE / 15",   minval = 0, maxval = 15, step = 0.5, group = gCore, tooltip = "Structure floor. Volume alone can never carry a rolling-over chart into a trade.")
+
+gTf = "2 . Timeframes"
+structTf  = input.timeframe("5", "Structure timeframe", group = gTf, tooltip = "5-minute for the EMA structure while you execute on 1-minute. Leave as is unless you know why to change it.")
+useSessVwap = input.bool(true, "Anchor VWAP to the session", group = gTf, tooltip = "ON = VWAP resets each session like the scanner's intraday VWAP. OFF = anchored to the first bar on the chart.")
+
+gLen = "3 . Lengths"
+emaFastLen = input.int(9,  "Fast EMA", minval = 1, group = gLen, tooltip = "9 EMA = immediate momentum. Losing it means momentum cooled.")
+emaSlowLen = input.int(21, "Slow EMA", minval = 1, group = gLen, tooltip = "21 EMA = the swing. 9 under 21 = trend broken, stand down.")
+atrLen     = input.int(14, "ATR length", minval = 1, group = gLen)
+rvolSessions = input.int(10, "RVOL lookback sessions", minval = 2, maxval = 200, group = gLen, tooltip = "Compare this bar's volume to the same bar-of-session over N prior sessions.")
+
+gRisk = "4 . RISK - where you get out when wrong"
+riskMode   = input.string("ATR (adaptive)", "Stop basis", options = ["ATR (adaptive)", "Fixed % below VWAP"], group = gRisk, tooltip = "ATR adapts to the stock's own volatility - recommended. Fixed % is simpler but blind to the stock.")
+stopAtrMult = input.float(1.0, "Stop: ATR multiple below VWAP", minval = 0.1, step = 0.1, group = gRisk, tooltip = "Hard stop = VWAP - (ATR x this). Bigger = fewer shakeouts, larger loss.")
+stopPctVwap = input.float(3.0, "Stop: % below VWAP", minval = 0.1, step = 0.1, group = gRisk, tooltip = "Used only when 'Fixed %' is selected.")
+minStopPct  = input.float(1.0, "Minimum stop distance %", minval = 0.1, step = 0.1, group = gRisk, tooltip = "Floor so the stop is never so tight that spread alone triggers it.")
+trailLoosePct = input.float(11.0, "Trail % (normal trend)", minval = 1, step = 0.5, group = gRisk, tooltip = "How far price may pull back off the peak before the trend is over. Wide on purpose - runners need room.")
+trailTightPct = input.float(6.0,  "Trail % (climax)",       minval = 1, step = 0.5, group = gRisk, tooltip = "Once the move goes vertical, tighten so a blow-off cannot give back the gain.")
+atrMultLoose  = input.float(2.5,  "Trail ATR mult (normal)", minval = 0.5, step = 0.1, group = gRisk, tooltip = "Trail = wider of % and ATR x this, so a quiet stock is not stopped by noise.")
+atrMultTight  = input.float(1.3,  "Trail ATR mult (climax)", minval = 0.5, step = 0.1, group = gRisk)
+climaxTrigPct = input.float(18.0, "Climax when stretch >= % above VWAP", minval = 5, step = 1, group = gRisk, tooltip = "Parabolic threshold. Above this the tight trail takes over.")
+
+gTp = "5 . TAKE PROFIT - where you sell"
+tpWickStretch = input.float(10.0, "TP: stretch above 9 EMA %", minval = 1, step = 1, group = gTp, tooltip = "Selling into strength when price is this far above the 9 EMA AND prints a long upper wick.")
+tpWickPct     = input.float(25.0, "TP: upper wick % of candle", minval = 5, step = 5, group = gTp, tooltip = "Wick must be at least this share of the candle = someone sold the high.")
+tpHardStretch = input.float(16.0, "TP: hard stretch above VWAP %", minval = 1, step = 1, group = gTp, tooltip = "Take partials once this extended, wick or not. Greed at +16% is the classic runner killer - this is your MAXIMUM profit trigger.")
+tpBarAtrMult  = input.float(2.2,  "TP: climax bar range x ATR", minval = 1, step = 0.1, group = gTp, tooltip = "A single candle this many ATRs tall, far above VWAP, is a blow-off top.")
+
+gShow = "6 . Display"
+showLevels = input.bool(true, "VWAP / EMAs / trail", group = gShow)
+showBands  = input.bool(true, "VWAP sigma bands + climax zone", group = gShow)
+showStop   = input.bool(true, "Hard stop line", group = gShow)
+showHud    = input.bool(true, "HUD panel", group = gShow)
+enableAlerts = input.bool(true, "alert() calls (for webhook bots)", group = gShow)
+
+// =============================================================================
+// 2 . CORE LEVELS
+// =============================================================================
+// EMAs on the structure timeframe, mapped back to the chart.
+[emaF, emaS, atrS] = request.security(syminfo.tickerid, structTf, [ta.ema(close, emaFastLen), ta.ema(close, emaSlowLen), ta.atr(atrLen)])
+
+// -- VWAP built explicitly (Sum typical x vol / Sum vol) so the deviation bands
+//    are exact and the script never depends on an unverified ta.vwap overload.
+newDay = ta.change(time("D")) != 0
+var float cumPV = 0.0   // Sum typical*volume
+var float cumV  = 0.0   // Sum volume
+var float cumPP = 0.0   // Sum typical^2*volume  (for the variance)
+if newDay and useSessVwap
+    cumPV := 0.0
+    cumV := 0.0
+    cumPP := 0.0
+typ = hlc3
+cumPV := cumPV + typ * volume
+cumV := cumV + volume
+cumPP := cumPP + typ * typ * volume
+vwapVal = cumV > 0 ? cumPV / cumV : na
+// Volume-weighted population variance around VWAP -> 1 sigma deviation.
+vwapVar = cumV > 0 ? math.max(0.0, cumPP / cumV - vwapVal * vwapVal) : 0.0
+vwapSd  = math.sqrt(vwapVar)
+band1Up = vwapVal + vwapSd
+band2Up = vwapVal + vwapSd * 2.0
+band3Up = vwapVal + vwapSd * 3.0
+
+// -- Day high / low, non-repainting: high[1] + lookahead_on is TradingView's
+//    documented idiom for "last CONFIRMED daily value", so a stop never moves
+//    after the fact. On a daily chart the bar's own high/low is the correct value.
+[dPrevHigh, dPrevLow, dPrevClose] = request.security(syminfo.tickerid, "D", [high[1], low[1], close[1]], lookahead = barmerge.lookahead_on)
+onDaily  = timeframe.in_seconds(timeframe.period) >= timeframe.in_seconds("D")
+dayHigh  = onDaily ? high : math.max(nz(dPrevHigh, high), high)
+dayLow   = onDaily ? low  : math.min(nz(dPrevLow, low), low)
+prevClose = onDaily ? close[1] : nz(dPrevClose, close)
+
+// =============================================================================
+// 3 . TAPE SCORE  (0..100 - mirrors scoring.py's TAPE component)
+//     Each sub-score is a 0..1 ramp between a floor and a ceiling, averaged.
+// =============================================================================
+lin(x, lo, hi) => na(x) ? float(na) : math.max(0.0, math.min(1.0, (x - lo) / (hi - lo)))
+
+gainPrev = prevClose > 0 ? (close - prevClose) / prevClose * 100.0 : na
+gainOpen = open > 0 ? (close - open) / open * 100.0 : na
+rangeExp = prevClose > 0 ? (dayHigh - dayLow) / prevClose * 100.0 : na
+vwapDist = vwapVal > 0 ? (close - vwapVal) / vwapVal * 100.0 : na
+accel    = close[1] > 0 ? (close - close[1]) / close[1] * 100.0 : na
+
+// -- RVOL: volume in this bar vs the average volume in the SAME bar of the last
+//    rvolSessions sessions. Flat arrays keyed by bar-of-session keep it simple.
+var array<float> curSessionVols = array.new<float>()
+var array<float> sumVols        = array.new<float>()
+var array<float> countVols      = array.new<float>()
+
+if newDay
+    // Fold the finished session into the running per-bar-of-session sums.
+    // GUARD: an empty array would make the loop DESCENDING (0 to -1), and v6
+    // allows negative indices, so it would silently read from the end. Guard it.
+    nBars = curSessionVols.size()
+    if nBars > 0
+        for i = 0 to nBars - 1
+            if i >= sumVols.size()
+                sumVols.push(curSessionVols.get(i))
+                countVols.push(1.0)
+            else
+                sumVols.set(i, sumVols.get(i) + curSessionVols.get(i))
+                countVols.set(i, countVols.get(i) + 1.0)
+        curSessionVols.clear()
+        // Keep the running average from drifting too far: cap the sample count.
+        nSums = countVols.size()
+        for i = 0 to nSums - 1
+            if countVols.get(i) > rvolSessions
+                countVols.set(i, float(rvolSessions))
+
+barOfSession = curSessionVols.size()
+curSessionVols.push(volume)
+
+hasPrior = barOfSession < sumVols.size() and countVols.get(barOfSession) >= 2.0
+priorMeanVol = hasPrior ? sumVols.get(barOfSession) / countVols.get(barOfSession) : 0.0
+rvol = priorMeanVol > 0 ? volume / priorMeanVol : na
+
+// Volume velocity inside this bar (proxy for the scanner's 3m-vol / 10m-$vol).
+volBase  = ta.sma(volume, 20)
+volSpike = volBase > 0 ? volume / volBase : na
+
+tP = array.new<float>()
+if not na(gainPrev)
+    tP.push(lin(gainPrev, 2.0, 20.0))
+if not na(gainOpen)
+    tP.push(lin(gainOpen, 1.5, 15.0))
+if not na(rvol)
+    tP.push(lin(rvol, 1.2, 6.0))
+if not na(rangeExp)
+    tP.push(lin(rangeExp, 2.0, 15.0))
+if not na(accel)
+    tP.push(lin(accel, 0.5, 6.0))
+if not na(vwapDist)
+    tP.push(lin(vwapDist, 0.2, 5.0))
+if not na(volSpike)
+    tP.push(lin(volSpike, 1.0, 4.0))
+tapeScore = tP.size() > 0 ? tP.avg() * 100.0 : na
+
+// =============================================================================
+// 4 . STRUCTURE SCORE (mirrors scoring.py STRUCTURE) + the HOD gate
+//     The scanner averages FOUR terms; all four must be here or the points drift
+//     and MIN_STRUCTURE_SCORE would fire on the chart but not in Telegram.
+// =============================================================================
+ddFromHod = dayHigh > 0 ? (dayHigh - close) / dayHigh * 100.0 : na
+newHighFlag = close >= dayHigh ? 1.0 : 0.0
+gapPct = prevClose > 0 ? (open - prevClose) / prevClose * 100.0 : na
+// Distance from the 52-week low. Weekly[1] + lookahead_on = the last CONFIRMED
+// weekly bar, so this slow filter never repaints on the live week.
+w52Low = request.security(syminfo.tickerid, "W", ta.lowest(low, 52)[1], lookahead = barmerge.lookahead_on)
+dist52wLow = not na(w52Low) and w52Low > 0 ? (close - w52Low) / w52Low * 100.0 : na
+
+sP = array.new<float>()
+sP.push(newHighFlag)
+if not na(gapPct)
+    sP.push(lin(gapPct, 0.0, 15.0))
+if not na(dist52wLow)
+    // Nearer the 52w low is better risk/reward for a fresh runner.
+    sP.push(math.max(0.0, math.min(1.0, 1.0 - dist52wLow / 100.0)))
+if not na(ddFromHod)
+    // Rolling over past the threshold = ZERO structure, the scanner's hard rule.
+    sP.push(ddFromHod >= maxDdHodPct ? 0.0 : lin(1.0 - ddFromHod / maxDdHodPct, 0.0, 1.0))
+structRaw = sP.size() > 0 ? sP.avg() : 0.0
+structPts = structRaw * 15.0
+structOk  = structPts >= minStructPts
+backside  = not na(ddFromHod) and ddFromHod > maxDdHodPct
+
+// =============================================================================
+// 5 . RUN REGIME  (above VWAP with EMAs aligned = the only state worth trading)
+// =============================================================================
+aboveVwap  = not na(vwapVal) and close > vwapVal
+emaAligned = not na(emaF) and not na(emaS) and emaF >= emaS * 0.995
+inRun      = aboveVwap and emaAligned
+
+runStart  = inRun and not inRun[1]
+barsInRun = ta.barssince(runStart)
+
+// The armed level is where the run began - CHASE_CAP_PCT is measured from it.
+var float armedLevel = na
+armedLevel := (runStart or na(armedLevel)) ? close : armedLevel
+chaseFromArm = armedLevel > 0 ? (close - armedLevel) / armedLevel * 100.0 : 0.0
+chaseBlocked = chaseFromArm > chaseCapPct
+
+// =============================================================================
+// 6 . RISK MODEL  -  the part Gemini's version was missing
+// =============================================================================
+var float peakHigh = na
+peakHigh := runStart ? high : (inRun ? math.max(nz(peakHigh[1], high), high) : na)
+
+peakStretch = not na(vwapVal) and vwapVal > 0 ? (nz(peakHigh, high) - vwapVal) / vwapVal * 100.0 : 0.0
+isClimax    = peakStretch >= climaxTrigPct
+
+// Hard stop: the scanner's own invalidation line (VWAP) with a wick buffer.
+rawStopDist = riskMode == "ATR (adaptive)" ? nz(atrS, vwapVal * 0.02) * stopAtrMult : vwapVal * stopPctVwap / 100.0
+stopDist = math.max(math.max(rawStopDist, vwapVal * minStopPct / 100.0), syminfo.mintick * 2)
+hardStop = vwapVal - stopDist
+
+// Ratchet trail: loose in a grind, tight once parabolic. Only ever tightens.
+trailPct = (isClimax ? trailTightPct : trailLoosePct) / 100.0
+trailAtr = nz(atrS, 0.0) * (isClimax ? atrMultTight : atrMultLoose)
+rawTrail = nz(peakHigh, high) - math.max(nz(peakHigh, high) * trailPct, trailAtr)
+var float trailLine = na
+if runStart
+    trailLine := rawTrail
+else if inRun
+    trailLine := math.max(nz(trailLine, rawTrail), rawTrail)
+// NOTE: the trail is deliberately NOT cleared when a run ends. Clearing it would
+// hand a re-entry the much wider VWAP stop and silently widen the risk mid-trade.
+// Only a NEW run resets it.
+
+// The stop you actually use. Before the trail exists the risk is the VWAP stop;
+// once the trail ratchets above VWAP it becomes the exit and locks in profit.
+trailUsable   = inRun and not na(trailLine)
+effectiveStop = trailUsable ? math.max(hardStop, nz(trailLine, hardStop)) : hardStop
+riskPctNow    = close > 0 ? (close - effectiveStop) / close * 100.0 : na
+// A breached stop must read as "exit now", never as a negative risk %.
+stopBreached  = not na(effectiveStop) and close < effectiveStop
+
+// =============================================================================
+// 7 . TAKE-PROFIT ENGINE  -  sell into strength, only inside a live run
+//
+//     A blow-off top must be an OUTLIER, not merely "extended". Comparing only
+//     "high above +16% over VWAP" fires on EVERY bar of a vertical move, which
+//     would sell a +35% runner at +15%. So the extension test is combined with a
+//     genuine outlier test, and each run is allowed ONE blow-off / hard-stretch
+//     signal - the wick signal may repeat because a distribution wick is a
+//     repeated, per-bar fact.
+// =============================================================================
+emaStretch   = emaF > 0 ? (high - emaF) / emaF * 100.0 : 0.0
+vwapStretch  = vwapVal > 0 ? (high - vwapVal) / vwapVal * 100.0 : 0.0
+barRange     = high - low
+upperWickPct = barRange > 0 ? (high - close) / barRange * 100.0 : 0.0
+atrRef       = nz(atrS, barRange)
+enoughBars   = nz(barsInRun, 0) >= 2
+
+// One-shot flags per run: reset when a new run starts.
+var bool blowOffUsed = false
+var bool hardTpUsed  = false
+if runStart
+    blowOffUsed := false
+    hardTpUsed  := false
+
+// A . distribution wick: stretched AND a long upper wick. Repeatable by design -
+//     each such candle is new information that sellers are hitting the high.
+tpWick = inRun and enoughBars and emaStretch >= tpWickStretch and vwapStretch >= tpHardStretch and upperWickPct >= tpWickPct
+// B . parabolic blow-off: extended AND a candle that is an outlier on its own.
+tpBlowOff = inRun and enoughBars and not blowOffUsed and vwapStretch >= tpHardStretch and barRange >= atrRef * tpBarAtrMult
+// C . hard stretch: price closes strong far above VWAP. Closing strong (not just
+//     a wick) = real demand, so this is the "take a partial, it is +16% and still
+//     bid" trigger. One shot per run.
+tpHardClose = inRun and enoughBars and not hardTpUsed and vwapStretch >= tpHardStretch and close >= vwapVal * (1.0 + tpHardStretch / 100.0) and upperWickPct < 50.0
+
+// A stop that is already breached vetoes every TP: you do not "take profit into
+// strength" on a bar where your exit is gone - that is how a winner is turned
+// into a loser. The stop wins the same bar.
+tpSignal = (tpWick or tpBlowOff or tpHardClose) and not stopBreached
+tpRaw = tpSignal and barstate.isconfirmed
+if tpRaw
+    if tpBlowOff
+        blowOffUsed := true
+    if tpHardClose
+        hardTpUsed := true
+
+// =============================================================================
+// 8 . EXIT LOGIC  -  evaluated BEFORE TP so one bar is never both
+// =============================================================================
+// Only label it an EXIT if the trade had actually extended, so a scalp near VWAP
+// does not spam the chart. lostStop is the real decision: a close under the stop
+// in use. lostVwap catches the failure before the trail exists.
+runExtended  = not na(vwapVal) and vwapVal > 0 and (ta.highest(high, 10) - vwapVal) / vwapVal * 100.0 >= 8.0
+lostStop     = not na(effectiveStop[1]) and close < effectiveStop[1]
+lostVwap     = ta.crossunder(close, vwapVal)
+
+exitRaw      = runExtended and (lostStop or lostVwap) and barstate.isconfirmed
+barsSinceExit = ta.barssince(exitRaw[1])
+cleanExit    = exitRaw and (na(barsSinceExit) or barsSinceExit > 8) and not tpRaw
+barsSinceTp  = ta.barssince(tpRaw[1])
+cleanTp      = tpRaw and (na(barsSinceTp) or barsSinceTp > 6) and not cleanExit
+// The chart's "get out NOW" marker: stop breached without the extended-run
+// filter, so a first-bar breakdown is still flagged rather than silently ignored.
+stopHit      = lostStop and not cleanExit and barstate.isconfirmed
+
+// =============================================================================
+// 9 . TRADE GATES  -  the "should I take this at all?" checklist
+// =============================================================================
+// Absolute floor first (ROTD_MIN_SCORE), then the arming hurdle. A name can never
+// be tradeable while it is below either one - same two-step the scanner applies.
+aboveFloor = not na(tapeScore) and tapeScore >= rotdMinScore
+scoreOk    = not na(tapeScore) and tapeScore >= armMinScore
+tradeable  = inRun and not backside and structOk and not chaseBlocked and aboveFloor and scoreOk
+
+// ENTRY = a fresh run turning up with every gate green. Chart twin of the push.
+entryTrig = tradeable and runStart and barstate.isconfirmed
+
+// =============================================================================
+// 10 . PLOTS
+// =============================================================================
+plot(showLevels ? emaF : na,    "9 EMA",  color.new(color.green, 0),  2)
+plot(showLevels ? emaS : na,    "21 EMA", color.new(color.red, 0),    2)
+plot(showLevels ? vwapVal : na, "VWAP",   color.new(color.purple, 0), 2)
+plot(showLevels and trailUsable ? trailLine : na, "Ratchet trail", color.new(color.yellow, 0), 2, plot.style_linebr)
+
+pB2 = plot(showBands ? band2Up : na, "Climax floor (+2 sigma)", color.new(color.red, 75), 1)
+pB3 = plot(showBands ? band3Up : na, "Climax ceiling (+3 sigma)", color.new(color.red, 55), 1)
+fill(pB2, pB3, color.new(color.red, 86), "Climax zone")
+
+// The risk exit, always drawn so you see it BEFORE you enter.
+plot(showStop ? hardStop : na, "Hard stop (VWAP - buffer)", color.new(color.red, 30), 2, plot.style_linebr)
+plot(showStop and trailUsable ? effectiveStop : na, "Stop in use", color.new(color.orange, 0), 1, plot.style_linebr)
+
+// =============================================================================
+// 11 . SIGNALS
+// =============================================================================
+plotshape(entryTrig, "ENTRY", shape.triangleup, location.belowbar, color.new(color.aqua, 0), size = size.small, text = "ENTRY", textcolor = color.aqua)
+plotshape(cleanTp, "TAKE PROFIT", shape.triangledown, location.abovebar, color.new(color.lime, 0), size = size.small, text = "TP", textcolor = color.lime)
+plotshape(cleanExit, "EXIT", shape.xcross, location.belowbar, color.new(color.red, 0), size = size.small, text = "EXIT", textcolor = color.red)
+// Stop breached: the hard "you are wrong, get out" marker.
+plotshape(stopHit, "STOP HIT", shape.labeldown, location.abovebar, color.new(color.maroon, 0), size = size.small, text = "STOP", textcolor = color.white)
+// Early warning: first close back under VWAP while still in a run.
+plotshape(inRun[1] and lostVwap, "VWAP LOST", shape.diamond, location.belowbar, color.new(color.orange, 0), size = size.tiny, text = "VWAP", textcolor = color.orange)
+
+bgcolor(tradeable ? color.new(color.teal, 92) : na, title = "Tradeable run")
+bgcolor(backside and inRun ? color.new(color.red, 88) : na, title = "Backside of HOD - stand down")
+
+// =============================================================================
+// 12 . HUD  -  the numbers you actually decide on
+// =============================================================================
+var table hud = table.new(position.top_right, 2, 13, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 50))
+if barstate.islast and showHud
+    state = "WAIT"
+    if backside
+        state := "NO - BACKSIDE OF HOD"
+    else if chaseBlocked
+        state := "NO - TOO EXTENDED"
+    else if not structOk
+        state := "NO - WEAK STRUCTURE"
+    else if not aboveVwap
+        state := "NO - BELOW VWAP"
+    else if tradeable
+        state := "TRADEABLE"
+    stateColor = tradeable ? color.new(color.green, 30) : color.new(color.red, 30)
+    scoreColor = color.red
+    if na(tapeScore)
+        scoreColor := color.gray
+    else if tapeScore >= ignThreshold
+        scoreColor := color.lime
+    else if tapeScore >= armMinScore
+        scoreColor := color.yellow
+    table.cell(hud, 0, 0, "ROTD COMPANION", text_color = color.white, bgcolor = color.new(color.blue, 30), text_size = size.small)
+    table.cell(hud, 1, 0, state, text_color = color.white, bgcolor = stateColor, text_size = size.small)
+    table.cell(hud, 0, 1, "Tape score", text_size = size.small)
+    table.cell(hud, 1, 1, na(tapeScore) ? "n/a" : str.tostring(tapeScore, "#.#") + " / 100", text_size = size.small, text_color = scoreColor)
+    table.cell(hud, 0, 2, "Mode", text_size = size.small)
+    modeText = isClimax ? "CLIMAX - tight trail" : "TREND - loose trail"
+    modeColor = isClimax ? color.orange : color.teal
+    table.cell(hud, 1, 2, modeText, text_size = size.small, text_color = modeColor)
+    table.cell(hud, 0, 3, "Entry (now)", text_size = size.small)
+    table.cell(hud, 1, 3, str.tostring(close, format.mintick), text_size = size.small)
+    table.cell(hud, 0, 4, "Hard stop", text_size = size.small)
+    table.cell(hud, 1, 4, na(hardStop) ? "-" : str.tostring(hardStop, format.mintick), text_size = size.small, text_color = color.red)
+    table.cell(hud, 0, 5, "Stop in use", text_size = size.small)
+    table.cell(hud, 1, 5, na(effectiveStop) ? "-" : str.tostring(effectiveStop, format.mintick), text_size = size.small, text_color = color.orange)
+    riskText = na(riskPctNow) ? "-" : str.tostring(riskPctNow, "#.##") + " %"
+    if stopBreached
+        riskText := "STOP HIT - EXIT"
+    table.cell(hud, 0, 6, "Risk %", text_size = size.small)
+    table.cell(hud, 1, 6, riskText, text_size = size.small, text_color = stopBreached ? color.red : color.white)
+    table.cell(hud, 0, 7, "Stretch vs VWAP", text_size = size.small)
+    table.cell(hud, 1, 7, str.tostring(vwapStretch, "#.#") + " %", text_size = size.small)
+    table.cell(hud, 0, 8, "Structure pts", text_size = size.small)
+    table.cell(hud, 1, 8, str.tostring(structPts, "#.#") + " / 15", text_size = size.small, text_color = structOk ? color.lime : color.red)
+    table.cell(hud, 0, 9, "Chase from arm", text_size = size.small)
+    table.cell(hud, 1, 9, str.tostring(chaseFromArm, "#.#") + " %", text_size = size.small, text_color = chaseBlocked ? color.red : color.green)
+    table.cell(hud, 0, 10, "RVOL", text_size = size.small)
+    table.cell(hud, 1, 10, na(rvol) ? "building..." : str.tostring(rvol, "#.##") + "x", text_size = size.small)
+    table.cell(hud, 0, 11, "TP trigger", text_size = size.small)
+    tpText = ">= " + str.tostring(tpHardStretch, "#") + "% above VWAP"
+    table.cell(hud, 1, 11, tpText, text_size = size.small, text_color = color.lime)
+    table.cell(hud, 0, 12, "Score floor", text_size = size.small)
+    floorText = str.format("ARM {0} / IGN {1}", str.tostring(armMinScore, "#"), str.tostring(ignThreshold, "#"))
+    table.cell(hud, 1, 12, floorText, text_size = size.small)
+
+// =============================================================================
+// 13 . ALERTS  (webhook-ready; never fires mid-bar)
+// =============================================================================
+alertcondition(entryTrig, "ROTD ENTRY", "ROTD ENTRY {{ticker}} @ {{close}}")
+alertcondition(cleanTp,   "ROTD TAKE PROFIT", "ROTD TP {{ticker}} @ {{close}}")
+alertcondition(cleanExit, "ROTD EXIT", "ROTD EXIT {{ticker}} @ {{close}}")
+
+if enableAlerts
+    if entryTrig
+        alert(str.format("ROTD ENTRY {0} @ {1} | score {2} | STOP {3} | risk {4}%", syminfo.ticker, str.tostring(close, format.mintick), str.tostring(tapeScore, "#.#"), str.tostring(effectiveStop, format.mintick), str.tostring(riskPctNow, "#.##")), alert.freq_once_per_bar_close)
+    if cleanTp
+        alert(str.format("ROTD TP {0} @ {1} | take partials", syminfo.ticker, str.tostring(close, format.mintick)), alert.freq_once_per_bar_close)
+    if cleanExit
+        alert(str.format("ROTD EXIT {0} @ {1} | trend lost", syminfo.ticker, str.tostring(close, format.mintick)), alert.freq_once_per_bar_close)

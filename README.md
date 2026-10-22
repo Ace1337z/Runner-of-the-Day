@@ -933,6 +933,10 @@ only gains `auto_vacuum` after a full `VACUUM` or a fresh file — see
   including the shadow clock and the methodology_v3 auditor contract.
 - [`docs/methodology_v3.md`](docs/methodology_v3.md) — the red-team catalyst
   auditing methodology.
+- [`docs/indicator/README.md`](docs/indicator/README.md) — **trade the alerts on
+  the chart**: the ROTD Companion TradingView indicator, where to enter, where
+  the stop goes and where to take profit
+  ([source](docs/indicator/ROTD_Companion.pine)).
 
 ## Source adapters
 

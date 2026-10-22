@@ -9,3 +9,4 @@ tests/fixtures/** -text
 *.md text eol=lf
 *.py text eol=lf
 *.toml text eol=lf
+*.pine text eol=lf
