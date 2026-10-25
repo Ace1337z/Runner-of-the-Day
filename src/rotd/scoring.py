@@ -35,7 +35,7 @@ from typing import Any, Optional
 from .config import Config
 from .features import FeatureSet
 from .gates import GateReport
-from .normalize import Canonical
+from .normalize import Canonical, normalize_float_shares
 from .util import clamp, stable_json
 
 log = logging.getLogger(__name__)
@@ -121,6 +121,10 @@ def score_candidate(rec: Canonical, fs: FeatureSet, gates: GateReport, cfg: Conf
     fl = fs.value("float_shares")
     fuel = None
     if fl is not None:
+        # Defence in depth: normalize.py rescales at ingestion, but a caller
+        # building a FeatureSet by hand could still hand us a bare small number.
+        # A value under 10k cannot be a literal float, so it is millions.
+        fl = normalize_float_shares(fl)
         # Feature adapters normally normalize float to shares; Finviz-origin values
         # may be in millions. Treat plausible small magnitudes as millions, then
         # score relative to the methodology's 1M..35M range.

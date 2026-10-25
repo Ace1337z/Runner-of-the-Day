@@ -32,7 +32,8 @@ from datetime import datetime
 from typing import Any, Optional
 
 from .config import Config
-from .normalize import Canonical, Snapshot, R_OK, BASIS_REGULAR
+from .normalize import (Canonical, Snapshot, R_OK, BASIS_REGULAR,
+                        normalize_float_shares)
 from .util import clamp, safe_div
 
 log = logging.getLogger(__name__)
@@ -196,8 +197,11 @@ def compute_features(rec: Canonical, cfg: Config, snap: Snapshot,
         fs.add(Feature("drawdown_from_hod_pct", None, "%", missing_reason=M_NO_HISTORY))
 
     # float rotation: whole-day volume as a multiple of the free float.
-    if rec.volume is not None and rec.shares_float:
-        fs.add(Feature("float_rotation", rec.volume / rec.shares_float, "x",
+    # Uses the normalized float, so an unscaled source value (8 for 8M) cannot
+    # inflate rotation by 1e6 and max out the fuel bonus.
+    float_for_rotation = normalize_float_shares(rec.shares_float)
+    if rec.volume is not None and float_for_rotation:
+        fs.add(Feature("float_rotation", rec.volume / float_for_rotation, "x",
                        basis=rec.volume_basis))
     else:
         fs.add(Feature("float_rotation", None, "x", missing_reason=M_NO_FLOAT))
@@ -210,9 +214,12 @@ def compute_features(rec: Canonical, cfg: Config, snap: Snapshot,
 
     # --- fuel ---
     if rec.shares_float is not None:
-        fs.add(Feature("float_shares", rec.shares_float, "shares", basis=basis))
-        if rec.price:
-            fs.add(Feature("float_dollars", rec.shares_float * rec.price, "USD", basis=basis))
+        # Normalize before deriving anything: an unscaled source value (8 for 8M)
+        # would otherwise make float_dollars 1e6x too small.
+        float_shares = normalize_float_shares(rec.shares_float)
+        fs.add(Feature("float_shares", float_shares, "shares", basis=basis))
+        if rec.price and float_shares is not None:
+            fs.add(Feature("float_dollars", float_shares * rec.price, "USD", basis=basis))
         else:
             fs.add(Feature("float_dollars", None, "USD", missing_reason=M_NO_PRICE))
     else:

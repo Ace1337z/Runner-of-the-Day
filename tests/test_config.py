@@ -47,7 +47,7 @@ def test_typed_getters_and_defaults(cfg: Config):
     cfg._values["MAX_PRICE"] = "7.50"
     assert cfg.float("MAX_PRICE") == 7.5
     # an unset key falls back to the caller default (never a magic literal)
-    assert cfg.int("ALERT_BUDGET_PER_DAY", 3) == 5  # registry default is 5 (Upgrade 5)
+    assert cfg.int("ALERT_BUDGET_PER_DAY", 3) == 30  # Candle-1 release default
     assert cfg.str("AI_PROMPT_FILE", "methodology_v3.md") == "methodology_v3.md"
     # an override wins over the file
     c2 = Config(path=cfg.path, overrides={"MAX_PRICE": "4.0"})

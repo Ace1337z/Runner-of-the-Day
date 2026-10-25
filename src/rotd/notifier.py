@@ -20,6 +20,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from .config import Config
+from .normalize import normalize_float_shares
 from .scoring import Scored
 from .state_machine import State, Transition
 from .util import (age_str, compact, money, now_utc, num, pct, price_str,
@@ -65,7 +66,9 @@ def render_ignition(symbol: str, scored: Scored, rec: Any, slot: str, mode: str,
         if tape:
             lines.append("   ".join(tape))
         if rec.shares_float:
-            lines.append(f"Float {compact(rec.shares_float)}   "
+            # Normalized here too so an unscaled source value (8 for 8M) can
+            # never print as "Float 8" in an alert.
+            lines.append(f"Float {compact(normalize_float_shares(rec.shares_float))}   "
                          f"Short {num(rec.short_float)}%")
     # Component breakdown, worst first, so the weakest link is visible.
     comps = sorted(scored.components.items(), key=lambda kv: kv[1].points, reverse=True)

@@ -105,9 +105,12 @@ def test_data_snapshot_grade_is_worst_record(cfg: Config):
 
 # --- gates fail closed (when enabled) / not-enforced (by default) ----------
 
-def test_gates_fail_closed_without_spread_when_enabled(cfg: Config):
-    # G-18: the spread gate is OFF by default (no book feed). When explicitly
-    # enabled it must still fail closed on a missing spread.
+def test_spread_gate_passes_unknown_but_rejects_wide(cfg: Config):
+    # The spread gate is OFF by default (no book feed). When enabled, a missing
+    # book is NO LONGER a failure: extended/pre-market feeds routinely carry no
+    # L1 quote, and failing closed there blocked valid pre-market runners. An
+    # absent spread passes as SPREAD_NOT_ENFORCED; a MEASURED wide spread is
+    # still rejected.
     cfg._values["USE_SPREAD_GATE"] = "1"
     now = datetime(2026, 10, 13, 14, 0, tzinfo=UTC)
     rec = Canonical(symbol="X", price=2.0, prev_close=1.0, volume=1e6,
@@ -115,8 +118,20 @@ def test_gates_fail_closed_without_spread_when_enabled(cfg: Config):
     snap = _snap([rec])
     fs = compute_features(rec, cfg, snap)
     rep = run_gates(rec, fs, cfg, "OPEN", snap)
-    assert not rep.passed
-    assert any(g.gate == "G-SPREAD" and not g.passed for g in rep.results)
+    spread = next(g for g in rep.results if g.gate == "G-SPREAD")
+    assert spread.passed
+    assert spread.reason == "SPREAD_NOT_ENFORCED"
+
+    # A measured spread above the limit must still be rejected.
+    rec_wide = Canonical(symbol="X", price=2.0, prev_close=1.0, volume=1e6,
+                         volume_basis="SINGLE_VENUE", spread_pct=29.29,
+                         data_grade="A", fetched_at=now)
+    snap2 = _snap([rec_wide])
+    fs2 = compute_features(rec_wide, cfg, snap2)
+    rep2 = run_gates(rec_wide, fs2, cfg, "OPEN", snap2)
+    spread2 = next(g for g in rep2.results if g.gate == "G-SPREAD")
+    assert not spread2.passed
+    assert spread2.reason == "SPREAD_WIDE"
 
 
 def test_spread_liquidity_exit_gates_not_enforced_by_default(cfg: Config):

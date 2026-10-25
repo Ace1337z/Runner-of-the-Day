@@ -165,12 +165,17 @@ def gate_spread(rec: Canonical, cfg: Config, mode: str) -> GateResult:
                           "no bid/ask feed; gate not enforced (VERIFIED G-18)")
     if rec.price is None:
         return GateResult("G-SPREAD", False, F_PRICE_UNKNOWN)
+    # A missing book is NOT a wide spread. Extended/pre-market feeds routinely
+    # carry no L1 quote (Finviz "Spread n/a"), and failing closed there blocked
+    # valid pre-market runners while the gate was on. So: enforce a measured
+    # spread strictly, and pass an UNKNOWN spread as NOT_ENFORCED (visible, not
+    # silently accepted). A genuinely wide spread is still rejected below.
+    if rec.spread_pct is None:
+        return GateResult("G-SPREAD", True, G_SPREAD_NOT_ENFORCED,
+                          "no bid/ask; passing unknown spread")
     limit = _spread_limit(rec.price, cfg, mode)
     if limit is None:
         return GateResult("G-SPREAD", False, F_SPREAD_UNKNOWN)
-    if rec.spread_pct is None:
-        return GateResult("G-SPREAD", False, F_SPREAD_UNKNOWN,
-                          "no bid/ask; cannot confirm tradability")
     if rec.spread_pct > limit:
         return GateResult("G-SPREAD", False, F_SPREAD_WIDE,
                           f"{rec.spread_pct:.2f}% > {limit:.2f}%")

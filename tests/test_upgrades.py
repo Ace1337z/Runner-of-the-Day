@@ -107,7 +107,7 @@ def test_setbudget_rejects_out_of_range(tmp_path):
     tg = FakeTelegram(cfg)
     assert "must be" in tg.handle_command("/setbudget 99", "42", cfg)
     assert "invalid" in tg.handle_command("/setbudget abc", "42", cfg)
-    assert cfg.int("ALERT_BUDGET_PER_DAY", 5) == 5  # unchanged
+    assert cfg.int("ALERT_BUDGET_PER_DAY", 5) == 30  # unchanged
 
 
 # --- Upgrade 6: market-cap scope -------------------------------------------

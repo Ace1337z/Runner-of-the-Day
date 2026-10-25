@@ -65,6 +65,8 @@ R_BOARD_HOLD = "BOARD_HOLD_DWELL"
 R_BOARD_EXIT = "BOARD_EXIT_RANK"
 R_ARM = "ARM_RANK_AND_SCORE"
 R_ARM_CHASE = "ARM_CHASE_CAP"
+R_ARM_BELOW_VWAP = "IGNITION_BELOW_VWAP_TOLERANCE"
+R_IGNITE_RED_DAY = "ABORT_RED_ON_DAY"
 R_ARM_RANK = "ARM_RANK_TOO_LOW"
 R_ARM_SCORE = "ARM_SCORE_TOO_LOW"
 R_ARM_STRUCT = "ARM_STRUCTURE_TOO_LOW"
@@ -77,6 +79,7 @@ R_IGNITE_BUDGET = "IGNITION_BUDGET_EXHAUSTED"
 R_IGNITE_DUP = "IGNITION_ALREADY_TODAY"
 R_IGNITE_GAP = "IGNITION_MIN_GAP"
 R_IGNITE_PHASE = "IGNITION_PHASE_CLOSED"
+R_IGNITE_MIDDAY_TAPE = "IGNITION_MIDDAY_TAPE_TOO_LOW"
 R_ABORT_VWAP = "ABORT_BELOW_VWAP"
 R_ABORT_SPREAD = "ABORT_SPREAD_WIDE"
 R_ABORT_DATA = "ABORT_DATA_QUALITY"
@@ -235,6 +238,9 @@ class StateMachine:
         # double-top into ARMED.
         struct_of = {s.symbol: (s.components.get("STRUCTURE").points if s.components.get("STRUCTURE") else 0.0)
                      for s in ranking.day_ranked}
+        # Raw (0..1) TAPE per symbol, for the extra MIDDAY velocity floor.
+        tape_raw_of = {s.symbol: (s.components.get("TAPE").raw if s.components.get("TAPE") else None)
+                       for s in ranking.day_ranked}
         qualified_syms = {s.symbol for s in ranking.day_ranked}
 
         # Extra symbols seen this cycle that are not ranked (still advance state).
@@ -394,6 +400,24 @@ class StateMachine:
                     out.append(Transition(sym, prev, State.ARMED, R_BACKSIDE_OF_HOD,
                                           f"{price} vs hod {getattr(rec, 'day_high', None)}"))
                     continue
+                # Must be GREEN ON THE DAY. A dead-cat bounce or sub-VWAP chop is
+                # not a runner even when the score momentarily qualifies.
+                prev_close = getattr(rec, "prev_close", None) if rec is not None else None
+                if price is not None and prev_close is not None and price <= prev_close:
+                    st.confirm_bars = 0
+                    out.append(Transition(sym, prev, State.ARMED, R_IGNITE_RED_DAY,
+                                          f"{price:.4f} <= prev close {prev_close:.4f}"))
+                    continue
+                # VWAP retest tolerance: a healthy breakout often wicks back to
+                # VWAP support. 0.5% below VWAP is tolerated; deeper is not.
+                vwap_val = vwaps.get(sym)
+                if vwap_val and price is not None:
+                    vwap_tolerance = vwap_val * (1.0 - self.cfg.float("VWAP_IGNITION_TOLERANCE_PCT", 0.5) / 100.0)
+                    if price < vwap_tolerance:
+                        st.confirm_bars = 0
+                        out.append(Transition(sym, prev, State.ARMED, R_ARM_BELOW_VWAP,
+                                              f"{price:.4f} below vwap tolerance {vwap_tolerance:.4f}"))
+                        continue
                 armed = st.armed_level
                 # Chase cap: never ignite far above the armed level.
                 if price and armed and armed > 0:
@@ -414,6 +438,17 @@ class StateMachine:
                 if not self.cfg.bool(f"{mode}_ALLOW_IGNITION", mode not in ("OVERNIGHT", "CLOSED")):
                     out.append(Transition(sym, prev, State.ARMED, R_IGNITE_PHASE, mode))
                     continue
+                # MIDDAY velocity floor: keep midday enabled for genuine breaking-news
+                # rockets, but refuse a slow stair-step grind that only qualifies
+                # because FUEL/STRUCTURE/CONTEXT are maxed.
+                if mode == "MIDDAY":
+                    mid_floor = self.cfg.float("MIDDAY_MIN_TAPE_RAW", 0.72)
+                    tape_raw = tape_raw_of.get(sym)
+                    if mid_floor > 0 and (tape_raw is None or tape_raw < mid_floor):
+                        out.append(Transition(sym, prev, State.ARMED, R_IGNITE_MIDDAY_TAPE,
+                                              f"tape {tape_raw if tape_raw is not None else 'n/a'}"
+                                              f" < {mid_floor:.2f} in MIDDAY"))
+                        continue
                 # Budget.
                 ok, why = self.budget.can_spend(score, self.cfg, sym, now)
                 if not ok:

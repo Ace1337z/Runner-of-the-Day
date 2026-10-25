@@ -203,6 +203,10 @@ def test_reminders_are_per_user_not_broadcast(tmp_path: Path):
 
 def test_daemon_hook_is_interval_gated_and_toggleable(tmp_path: Path):
     store, cfg, tg = _setup(tmp_path)
+    # The Candle-1 release ships EXPIRY_REMINDERS=0 (off by default), so the
+    # hook is exercised with the feature explicitly enabled.
+    assert cfg.bool("EXPIRY_REMINDERS") is False
+    cfg.set("EXPIRY_REMINDERS", "1")
     _expire_in(store, "222", 0)
 
     _remind_expiries.last = 0.0

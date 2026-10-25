@@ -720,9 +720,9 @@ purpose. Secrets (`secret=True`) are never displayed or logged.
 ### Live-volume gate & front-side structure
 | Setting | Default | Unit | Meaning |
 |---|---|---|---|
-| `MIN_VOL_3M_SHARES` | `15000` | shares | Minimum shares traded in the last 3 minutes (rolling in-memory delta). Blocks ARMED/IGNITION on dead tape; warmup also fails closed. |
-| `MIN_DVOL_10M_REG` | `40000` | USD | Minimum 10-minute rolling dollar volume in OPEN/MIDDAY. |
-| `MIN_DVOL_10M_EXT` | `15000` | USD | Minimum 10-minute rolling dollar volume in PRE/POST. |
+| `MIN_VOL_3M_SHARES` | `50000` | shares | Minimum shares traded in the last 3 minutes (rolling in-memory delta). Blocks ARMED/IGNITION on dead tape; warmup also fails closed. |
+| `MIN_DVOL_10M_REG` | `150000` | USD | Minimum 10-minute rolling dollar volume in OPEN/MIDDAY. |
+| `MIN_DVOL_10M_EXT` | `75000` | USD | Minimum 10-minute rolling dollar volume in PRE/POST. |
 | `MAX_DRAWDOWN_FROM_HOD_PCT` | `15.0` | % | Block ARMED→IGNITION when price is more than this below the day high; a drawdown at/over this zeroes the structure sub-score. |
 | `MIN_STRUCTURE_SCORE` | `4.0` | points | Minimum weighted STRUCTURE points (of 15) required to reach (and hold) ARMED. |
 
@@ -777,13 +777,15 @@ silently cap the score.
 |---|---|---|---|
 | `BOARD_SIZE` | `5` | names | BOARD = top 5 qualified candidates. |
 | `ROTD_MIN_SCORE` | `60` | points | Rank 1 is only ROTD if score ≥ this. |
-| `QUALIFY_CONSEC` | `2` | cycles | Consecutive fully-gated cycles to reach QUALIFIED. |
-| `BOARD_MIN_DWELL_S` | `60` | s | Must stay top-5 this long to hold BOARD. |
+| `QUALIFY_CONSEC` | `1` | cycles | Consecutive fully-gated cycles to reach QUALIFIED (Candle-1: first candle can qualify). |
+| `BOARD_MIN_DWELL_S` | `15` | s | Must stay top-5 this long to hold BOARD. |
 | `BOARD_EXIT_RANK` | `8` | rank | Leaves BOARD only below this rank. |
 | `ARM_MAX_RANK` | `3` | rank | ARMED requires rank ≤ this. |
-| `ARM_MIN_SCORE` | `68` | points | ARMED requires score ≥ this. |
-| `IGNITION_THRESHOLD` | `70` | points | ARMED keeps its confirmation only while score ≥ this (last gate before IGNITION). |
-| `CHASE_CAP_PCT` | `25.0` | % | No ignition if price is >this% above the armed level. |
+| `ARM_MIN_SCORE` | `78` | points | ARMED requires score ≥ this. |
+| `IGNITION_THRESHOLD` | `78` | points | ARMED keeps its confirmation only while score ≥ this (last gate before IGNITION — the alert trigger). Matches `ARM_MIN_SCORE` so a name cannot arm at 78 and fire at 70. |
+| `CHASE_CAP_PCT` | `18.0` | % | No ignition if price is >this% above the armed level. |
+| `VWAP_IGNITION_TOLERANCE_PCT` | `0.5` | % | Ignition tolerates a wick this far **below** VWAP (a retest of VWAP support) instead of aborting on a strict `price < vwap` test. |
+| `MIDDAY_MIN_TAPE_RAW` | `0.72` | 0..1 | MIDDAY only: the TAPE component must reach this raw score to ignite, so a slow 2-hour stair-step grind cannot ride maxed FUEL/STRUCTURE/CONTEXT to an alert. `0` disables it. |
 | `EXT_CONFIRM_BARS` | `1` | bars | POST/PRE need this many confirming extended bars. |
 | `REG_CONFIRM_BARS` | `1` | bars | Regular hours need this many confirming bars. |
 | `HALT_RESUME_EVAL_MIN` | `2` | minutes | Evaluate a resumption for this long after a halt. |
@@ -805,8 +807,8 @@ window over.
 ### Alert budget (scarcity)
 | Setting | Default | Unit | Meaning |
 |---|---|---|---|
-| `ALERT_BUDGET_PER_DAY` | `5` | pushes | Max IGNITION pushes per trading day. Change live via `/setbudget N`. |
-| `ALERT_BUDGET_MIN` / `ALERT_BUDGET_MAX` | `1` / `10` | pushes | Accepted range for `/setbudget` (0 would silence the day; 10 caps a typo). |
+| `ALERT_BUDGET_PER_DAY` | `30` | pushes | Max IGNITION pushes per trading day. Change live via `/setbudget N`. |
+| `ALERT_BUDGET_MIN` / `ALERT_BUDGET_MAX` | `1` / `50` | pushes | Accepted range for `/setbudget` (0 would silence the day; 50 caps a typo). |
 | `RESERVE_SLOTS` | `1` | pushes | Reserve pushes beyond budget for exceptional names. |
 | `EXCEPTIONAL_SCORE` | `90` | points | A reserve candidate must score at least this. |
 | `ALERT_MIN_GAP_MIN` | `15` | minutes | Minimum spacing between pushes. |
@@ -840,7 +842,7 @@ override of the scarcity rule.
 |---|---|---|---|
 | `CATALYST_TOP_N_EARLY` | `10` | rank | Audit a candidate's catalyst once it reaches this rank. |
 | `CATALYST_CACHE_TTL_H` | `24` | hours | Cache a verdict by (symbol, item id). |
-| `CATALYST_TIMEOUT_S` | `45` | s | LLM timeout → catalyst UNKNOWN (fails closed). |
+| `CATALYST_TIMEOUT_S` | `15` | s | LLM timeout → catalyst UNKNOWN (fails closed). |
 | `AI_PROMPT_FILE` | `methodology_v3.md` | file | System prompt under `prompts/`. |
 | `AI_TEMPERATURE` | `0.0` | float | Auditor temperature (0 required). |
 | `AI_MAX_TOKENS` | `1200` | tokens | Auditor response cap. |
@@ -871,8 +873,8 @@ rules-only deployment prints `~ catalyst: no model configured`.
 ### Retention, database & ops
 | Setting | Default | Unit | Meaning |
 |---|---|---|---|
-| `RAW_RETENTION_HOURS` | `2` | hours | Delete raw payloads older than this (2h is enough for replay/debugging). |
-| `CAND_RETENTION_HOURS` | `2` | hours | Delete candidates/decisions older than this; alerts/snapshots are the grading record. |
+| `RAW_RETENTION_HOURS` | `1` | hours | Delete raw payloads older than this. |
+| `CAND_RETENTION_HOURS` | `1` | hours | Delete candidates/decisions older than this; alerts/snapshots are the grading record. |
 | `RAW_RETENTION_DAYS` | `7` | days | Hard prune of `raw_payloads` and stale `candidates`. |
 | `DB_PRUNE_INTERVAL_S` | `300` | s | Run retention + incremental vacuum this often (and once at startup). |
 | `CAND_JSON_TOP_N` | `50` | rank | Keep full gate/feature JSON only for this many top names; other rows store compact reasons. |
@@ -895,8 +897,8 @@ only gains `auto_vacuum` after a full `VACUUM` or a fresh file — see
 | `SHADOW_AUTOSTART` | `0` | bool | 1 = start the clock on the first shadow cycle. |
 | `SHADOW_RUN_WHEN_CLOSED` | `1` | bool | 1 = keep running cycles outside NYSE sessions (off-thread, so commands stay responsive). |
 | `SELFTEST` | `0` | bool | 1 = fully offline deterministic mode. |
-| `UNIVERSE_POLL_S` | `30` | s | Universe sweep cadence (mode profile overrides). |
-| `MOVERS_POLL_S` | `20` | s | Mover-screen cadence (mode profile overrides). |
+| `UNIVERSE_POLL_S` | `15` | s | Universe sweep cadence (mode profile overrides). |
+| `MOVERS_POLL_S` | `10` | s | Mover-screen cadence (mode profile overrides). |
 | `LISTEN_POLL_S` | `5` | s | `rotd listen` loop cadence: one cycle + one command poll. |
 | `TELEGRAM_POLL_TIMEOUT_S` | `20` | s | Long-poll timeout for `getUpdates`. |
 | `WATCHDOG_STALL_S` | `180` | s | A cycle longer than this trips the watchdog. |
@@ -906,7 +908,7 @@ only gains `auto_vacuum` after a full `VACUUM` or a fresh file — see
 ### Source caching & rate limits
 | Setting | Default | Unit | Meaning |
 |---|---|---|---|
-| `QUOTE_CACHE_TTL_S` | `60` | s | Reuse a successful per-symbol quote within this window. |
+| `QUOTE_CACHE_TTL_S` | `10` | s | Reuse a successful per-symbol quote within this window. |
 | `SOURCE_COOLDOWN_S` | `60` | s | After an HTTP 429 a source rests this long before its next call. |
 | `TRADINGVIEW_ENABLED` | `1` | bool | Keyless batch freshness scanner; falls back to Alpaca/Finnhub when off. |
 | `TRADINGVIEW_TIMEOUT_S` | `10` | s | HTTP timeout for one batch scanner POST. |

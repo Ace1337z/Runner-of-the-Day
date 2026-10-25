@@ -80,18 +80,25 @@ _GLOBAL: list[Setting] = [
 
     # --- hard live-volume gate (section 2) ---
     # Fail closed on warmup/dead tape: whole-day volume is NOT enough to alert.
-    Setting("MIN_VOL_3M_SHARES", "15000", "shares",
+    Setting("MIN_VOL_3M_SHARES", "50000", "shares",
             "Minimum shares traded in the last 3 minutes (in-memory rolling delta). "
             "Blocks ARMED/IGNITION on dead tape; None (warmup) also fails closed."),
-    Setting("MIN_DVOL_10M_REG", "40000", "USD",
+    Setting("MIN_DVOL_10M_REG", "150000", "USD",
             "Minimum 10-minute rolling dollar volume in OPEN/MIDDAY."),
-    Setting("MIN_DVOL_10M_EXT", "15000", "USD",
+    Setting("MIN_DVOL_10M_EXT", "75000", "USD",
             "Minimum 10-minute rolling dollar volume in PRE/POST."),
 
     # --- front-side structure (section 8) ---
     Setting("MAX_DRAWDOWN_FROM_HOD_PCT", "15.0", "%",
             "Block ARMED->IGNITION when price is more than this below the day high "
             "(no backside-of-HOD fades)."),
+    Setting("VWAP_IGNITION_TOLERANCE_PCT", "0.5", "%",
+            "Ignition tolerates a wick this far BELOW VWAP (a healthy retest of VWAP "
+            "support), instead of aborting on a strict price < vwap test."),
+    Setting("MIDDAY_MIN_TAPE_RAW", "0.72", "0..1",
+            "MIDDAY only: the TAPE component must reach this raw score to ignite, so a "
+            "slow 2-hour stair-step grind cannot ride maxed FUEL/STRUCTURE/CONTEXT to an "
+            "alert. 0 disables the extra midday floor."),
     Setting("MIN_STRUCTURE_SCORE", "4.0", "points",
             "Minimum weighted STRUCTURE points (of 15) required to reach ARMED. "
             "Rejects high-volume/fuel setups with terrible front-side structure."),
@@ -116,7 +123,7 @@ _GLOBAL: list[Setting] = [
     # count, so the gates are OFF by default and report NOT_ENFORCED rather than
     # fail-closed on data the system structurally cannot obtain. Turn one on the
     # moment a feed supplies its input (e.g. Alpaca unblocked for the book).
-    Setting("USE_SPREAD_GATE", "0", "bool",
+    Setting("USE_SPREAD_GATE", "1", "bool",
             "G-SPREAD needs a bid/ask book; no source has one (VERIFIED G-18). 0 = not enforced."),
     Setting("USE_LIQ_GATE", "0", "bool",
             "G-LIQ needs 15-min dollar volume; needs a 1-min bar feed (VERIFIED G-18). 0 = not enforced."),
@@ -136,21 +143,21 @@ _GLOBAL: list[Setting] = [
             "Rank 1 is only ROTD if its score is at least this (else 'no qualified runner')."),
 
     # --- state machine / hysteresis (section 11.1) ---
-    Setting("QUALIFY_CONSEC", "2", "cycles", "Consecutive fully-gated cycles to reach QUALIFIED."),
-    Setting("BOARD_MIN_DWELL_S", "60", "s", "Must stay top-5 this long to hold BOARD (hysteresis)."),
+    Setting("QUALIFY_CONSEC", "1", "cycles", "Consecutive fully-gated cycles to reach QUALIFIED."),
+    Setting("BOARD_MIN_DWELL_S", "15", "s", "Must stay top-5 this long to hold BOARD (hysteresis)."),
     Setting("BOARD_EXIT_RANK", "8", "rank", "Leaves BOARD only below this rank (hysteresis)."),
     Setting("ARM_MAX_RANK", "3", "rank", "ARMED requires rank <= this."),
-    Setting("ARM_MIN_SCORE", "68", "points", "ARMED requires score >= this, re-checked every cycle while ARMED."),
-    Setting("IGNITION_THRESHOLD", "70", "points", "ARMED keeps its confirmation only while score >= this; the last gate before IGNITION."),
-    Setting("CHASE_CAP_PCT", "25.0", "%", "No ignition if price is >this% above the armed level."),
+    Setting("ARM_MIN_SCORE", "78", "points", "ARMED requires score >= this, re-checked every cycle while ARMED."),
+    Setting("IGNITION_THRESHOLD", "78", "points", "ARMED keeps its confirmation only while score >= this; the last gate before IGNITION (the alert trigger)."),
+    Setting("CHASE_CAP_PCT", "18.0", "%", "No ignition if price is >this% above the armed level."),
     Setting("EXT_CONFIRM_BARS", "1", "bars", "POST/PRE need this many confirming extended bars."),
     Setting("REG_CONFIRM_BARS", "1", "bars", "Regular hours need this many confirming bars."),
     Setting("HALT_RESUME_EVAL_MIN", "2", "minutes", "Evaluate a resumption for this long after a halt."),
 
     # --- alert budget (section 11.2) ---
-    Setting("ALERT_BUDGET_PER_DAY", "5", "pushes", "At most this many IGNITION pushes per trading day (A1)."),
+    Setting("ALERT_BUDGET_PER_DAY", "30", "pushes", "At most this many IGNITION pushes per trading day (A1)."),
     Setting("ALERT_BUDGET_MIN", "1", "pushes", "Floor for /setbudget (a sane minimum; 0 would silence the day)."),
-    Setting("ALERT_BUDGET_MAX", "10", "pushes", "Ceiling for /setbudget (a sane cap so a typo cannot set an absurd budget)."),
+    Setting("ALERT_BUDGET_MAX", "50", "pushes", "Ceiling for /setbudget (a sane cap so a typo cannot set an absurd budget)."),
     Setting("EXCEPTIONAL_SCORE", "90", "points", "A reserve-slot candidate must score at least this (A4)."),
     Setting("ALERT_MIN_GAP_MIN", "15", "minutes", "Minimum spacing between pushes (A3)."),
     Setting("RESERVE_SLOTS", "1", "pushes", "Reserve pushes beyond the budget for exceptional names (A4)."),
@@ -174,8 +181,8 @@ _GLOBAL: list[Setting] = [
     # --- catalyst service (section 10) ---
     Setting("CATALYST_TOP_N_EARLY", "10", "rank", "Audit a candidate's catalyst early once it reaches this rank."),
     Setting("CATALYST_CACHE_TTL_H", "24", "hours", "Cache a catalyst audit by (symbol, item id)."),
-    Setting("CATALYST_TIMEOUT_S", "45", "s", "LLM call timeout; on timeout the catalyst is UNKNOWN."),
-    Setting("AI_TIMEOUT_S", "30", "s", "Request timeout for AI auditor/verdict calls; longer prompts to slow gateways need 30s."),
+    Setting("CATALYST_TIMEOUT_S", "15", "s", "LLM call timeout; on timeout the catalyst is UNKNOWN."),
+    Setting("AI_TIMEOUT_S", "12", "s", "Request timeout for AI auditor/verdict calls; longer prompts to slow gateways need 30s."),
     Setting("AI_PROMPT_FILE", "methodology_v3.md", "file", "System prompt file under prompts/ (§10)."),
     Setting("AI_TEMPERATURE", "0.0", "float", "Auditor temperature; 0 is required by A6."),
     Setting("AI_MAX_TOKENS", "1200", "tokens", "Auditor response cap (A6: near 1200)."),
@@ -187,7 +194,7 @@ _GLOBAL: list[Setting] = [
     Setting("PROMO_AMPLIFY_PCT", "0", "%", "Reserved: promoter-amplification threshold; 0 = disabled."),
 
     # --- source rate limits / caching (§4.4, doctor 429 fix) ---
-    Setting("QUOTE_CACHE_TTL_S", "60", "s", "Reuse a successful per-symbol quote within this window instead of re-fetching."),
+    Setting("QUOTE_CACHE_TTL_S", "10", "s", "Reuse a successful per-symbol quote within this window instead of re-fetching."),
     Setting("SOURCE_COOLDOWN_S", "60", "s", "After an HTTP 429 a source is put on cooldown for this long before its next call."),
     Setting("TRADINGVIEW_ENABLED", "1", "bool", "Use the keyless TradingView scanner for batch freshness quotes; falls back to Alpaca/Finnhub when off/unavailable."),
     Setting("TRADINGVIEW_TIMEOUT_S", "10", "s", "HTTP timeout for one batch scanner POST."),
@@ -200,9 +207,9 @@ _GLOBAL: list[Setting] = [
 
     # --- retention / ops (section 13, 15) ---
     Setting("RAW_RETENTION_DAYS", "7", "days", "Delete raw_payloads and non-qualified per-cycle data older than this."),
-    Setting("RAW_RETENTION_HOURS", "2", "hours",
+    Setting("RAW_RETENTION_HOURS", "1", "hours",
             "Delete raw_payloads older than this (2h is enough for replay/debugging)."),
-    Setting("CAND_RETENTION_HOURS", "2", "hours",
+    Setting("CAND_RETENTION_HOURS", "1", "hours",
             "Delete non-board candidates/decisions older than this; board/armed/ignition rows are kept."),
     Setting("DB_PRUNE_INTERVAL_S", "300", "s",
             "Run the retention + incremental-vacuum pass this often (and once at startup)."),
@@ -216,8 +223,8 @@ _GLOBAL: list[Setting] = [
     Setting("QUIET_HOURS", "", "HH:MM-HH:MM,mode", "Optional per-mode quiet hours (none by default, §18.5)."),
 
     # --- runtime ---
-    Setting("UNIVERSE_POLL_S", "30", "s", "Universe sweep cadence (mode profile overrides)."),
-    Setting("MOVERS_POLL_S", "20", "s", "Mover-screen cadence (mode profile overrides)."),
+    Setting("UNIVERSE_POLL_S", "15", "s", "Universe sweep cadence (mode profile overrides)."),
+    Setting("MOVERS_POLL_S", "10", "s", "Mover-screen cadence (mode profile overrides)."),
     Setting("WATCHDOG_STALL_S", "180", "s", "A cycle taking longer than this trips the watchdog."),
     Setting("LISTEN_POLL_S", "5", "s", "Loop cadence of `rotd listen`: one cycle + one Telegram command poll (§14.4)."),
     Setting("TELEGRAM_POLL_TIMEOUT_S", "20", "s", "Long-poll timeout for getUpdates in `rotd listen`."),
@@ -226,7 +233,7 @@ _GLOBAL: list[Setting] = [
     Setting("SHADOW_DAYS_REQUIRED", "10", "trading_days", "Shadow clock length before live pushes are allowed (section 17 Phase 6)."),
     Setting("SHADOW_AUTOSTART", "0", "bool", "1 = start the shadow clock automatically on the first shadow cycle."),
     Setting("SHADOW_RUN_WHEN_CLOSED", "1", "bool", "1 = keep running decision cycles outside NYSE sessions (live off-thread so commands stay responsive)."),
-    Setting("EXPIRY_REMINDERS", "1", "bool",
+    Setting("EXPIRY_REMINDERS", "0", "bool",
             "1 = DM subscribers the T-7/T-3/T-1/T-0 renewal reminders (once per milestone per expiry; set RENEW_URL for the button)."),
     Setting("EXPIRY_REMINDER_INTERVAL_S", "3600", "s",
             "How often the listen daemon checks for due expiry reminders (the cadence itself is date-based, so this only controls latency)."),
@@ -257,9 +264,10 @@ for _m in ("POST", "OVERNIGHT", "PRE", "OPEN", "MIDDAY"):
     _MODE.append(Setting(f"{_m}_ALLOW_IGNITION", "1" if _m != "OVERNIGHT" else "0", "bool",
                          f"Whether IGNITION pushes are allowed in {_m} (OVERNIGHT never alerts on quotes).",
                          mode=_m))
-    _MODE.append(Setting(f"{_m}_POLL_S", {"POST": "30", "OVERNIGHT": "300", "PRE": "15",
-                                          "OPEN": "10", "MIDDAY": "30"}[_m], "s",
-                         f"Cycle cadence in {_m}.", mode=_m))
+    _MODE.append(Setting(f"{_m}_POLL_S", {"POST": "10", "OVERNIGHT": "300", "PRE": "10",
+                                          "OPEN": "10", "MIDDAY": "15"}[_m], "s",
+                         f"Cycle cadence in {_m}. Candle-1 speed: POST/PRE/OPEN poll "
+                         f"every 10s so a fresh ignition is caught on the first candle.", mode=_m))
 
 SETTINGS: list[Setting] = _GLOBAL + _MODE
 BY_KEY: dict[str, Setting] = {s.key: s for s in SETTINGS}

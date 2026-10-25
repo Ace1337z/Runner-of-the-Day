@@ -185,16 +185,17 @@ def _gate_checks(cfg: Config, results, step) -> None:
     now = now_utc()
     snap = Snapshot(trading_day=now.date(), mode="PRE", cycle_ts=now, records={})
 
-    # G-18: by default the spread/liquidity/exit gates are OFF (no book feed),
-    # so a no-spread record must NOT be blocked by them; they report NOT_ENFORCED.
+    # G-SPREAD is ON in production and SMART: a MISSING book passes as
+    # NOT_ENFORCED (pre-market feeds often carry no L1 quote), while a MEASURED
+    # wide spread is still rejected. G-LIQ/G-EXIT remain off (no 15m bar feed).
     rec_ne = Canonical(symbol="X", price=2.0, prev_close=1.0, volume=1e6,
                        volume_basis="SINGLE_VENUE", data_grade="A", fetched_at=now)
     fs_ne = F.compute_features(rec_ne, cfg, snap)
     rep_ne = run_gates(rec_ne, fs_ne, cfg, "PRE", snap)
     by = {g.gate: g for g in rep_ne.results}
     _check(by["G-SPREAD"].passed and by["G-SPREAD"].reason == "SPREAD_NOT_ENFORCED",
-           "spread gate default not NOT_ENFORCED", results,
-           "G-SPREAD default = NOT_ENFORCED (G-18)")
+           "unknown spread not passed as NOT_ENFORCED", results,
+           "G-SPREAD passes an unknown spread (no bid/ask)")
     _check(by["G-LIQ"].passed and by["G-LIQ"].reason == "LIQUIDITY_NOT_ENFORCED",
            "liq gate default not NOT_ENFORCED", results,
            "G-LIQ default = NOT_ENFORCED (G-18)")
@@ -202,18 +203,27 @@ def _gate_checks(cfg: Config, results, step) -> None:
            "exit gate default not NOT_ENFORCED", results,
            "G-EXIT default = NOT_ENFORCED (G-18)")
 
-    # When USE_SPREAD_GATE=1 the same record must fail closed on the missing spread.
+    # A MEASURED wide spread must still be refused when the gate is on. The gate
+    # is forced on for this check so the result does not depend on the ambient
+    # config (a deployment may still pin USE_SPREAD_GATE=0).
+    rec_wide = Canonical(symbol="X", price=2.0, prev_close=1.0, volume=1e6,
+                         volume_basis="SINGLE_VENUE", spread_pct=29.29,
+                         data_grade="A", fetched_at=now)
+    fs_wide = F.compute_features(rec_wide, cfg, snap)
+    prev_gate = cfg.raw("USE_SPREAD_GATE")
     cfg._values["USE_SPREAD_GATE"] = "1"
     try:
-        rep_on = run_gates(rec_ne, fs_ne, cfg, "PRE", snap)
+        rep_wide = run_gates(rec_wide, fs_wide, cfg, "MIDDAY", snap)
     finally:
-        cfg._values.pop("USE_SPREAD_GATE", None)
-    _check(not rep_on.passed, "no-spread record passed gates when enabled", results,
-           "G-SPREAD fails closed when enabled")
-    _check(any(g.gate == "G-SPREAD" and not g.passed for g in rep_on.results),
-           "G-SPREAD did not fail when enabled", results,
-           "G-SPREAD fails without bid/ask when enabled")
-    step("gates fail closed")
+        if prev_gate == "":
+            cfg._values.pop("USE_SPREAD_GATE", None)
+        else:
+            cfg._values["USE_SPREAD_GATE"] = prev_gate
+    wide = next(g for g in rep_wide.results if g.gate == "G-SPREAD")
+    _check(not wide.passed and wide.reason == "SPREAD_WIDE",
+           "measured wide spread was not rejected", results,
+           "G-SPREAD rejects a measured wide spread")
+    step("smart spread gate")
 
 
 def _score_checks(cfg: Config, results, step) -> None:

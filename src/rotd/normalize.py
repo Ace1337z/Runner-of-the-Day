@@ -151,6 +151,33 @@ def _sane_volume(v: Optional[float]) -> bool:
     return 0.0 <= v < 1e13
 
 
+# Below this, a "float_shares" value cannot be a literal share count: no public
+# equity trades with a total float of a few thousand shares. Upstream feeds
+# (Finviz / TradingView / Finnhub) occasionally emit the float in MILLIONS with
+# the scale dropped - ``8`` meaning 8,000,000 - so the value is rescaled here,
+# at the ingestion boundary, before anything downstream divides by it.
+FLOAT_MILLIONS_CEILING = 10_000.0
+FLOAT_MILLIONS_SCALE = 1_000_000.0
+
+
+def normalize_float_shares(value: Optional[float]) -> Optional[float]:
+    """Return ``float_shares`` as a literal share count.
+
+    A value in ``(0, 10_000)`` is treated as millions and scaled by 1e6. Every
+    other value (including ``None``, zero and negatives) is returned unchanged
+    so the caller's own sanity checks still apply.
+    """
+    if value is None:
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if 0 < f < FLOAT_MILLIONS_CEILING:
+        return f * FLOAT_MILLIONS_SCALE
+    return f
+
+
 def _clock_ok(ts: Optional[datetime], now: datetime, tolerance_s: float = 120.0) -> bool:
     """DATA-09: a timestamp far in the future is a clock-skew artefact."""
     if ts is None:
@@ -252,7 +279,9 @@ def reconcile_symbol(symbol: str, points: Iterable[PricePoint], cfg: Config,
         rec.spread_pct = safe_div(rec.ask - rec.bid, rec.price) * 100.0
 
     # DATA-06: float conflict.
-    fs = [f for f in (float_sources or []) if f[1]]
+    # Normalize every source first: a bare small number is millions, not shares.
+    fs = [(name, normalize_float_shares(val), ts)
+          for (name, val, ts) in (float_sources or []) if val]
     if fs:
         vals = [f[1] for f in fs if f[1]]
         lo, hi = min(vals), max(vals)
@@ -260,7 +289,10 @@ def reconcile_symbol(symbol: str, points: Iterable[PricePoint], cfg: Config,
             rec.note(R_FLOAT_CONFLICT)
             rec.float_reason = R_FLOAT_CONFLICT
         else:
-            rec.shares_float = hi  # prefer the larger (more conservative dilution)
+            # `hi` is already normalized above, so every downstream consumer
+            # (features, rotation, scoring, the alert formatter) sees a literal
+            # share count. Prefer the larger value: more conservative dilution.
+            rec.shares_float = hi
             rec.float_reason = R_OK
 
     if meta:

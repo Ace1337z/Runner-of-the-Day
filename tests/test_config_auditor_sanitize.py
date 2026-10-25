@@ -18,10 +18,10 @@ T0_S = datetime(2026, 10, 21, 14, 0, tzinfo=UTC)
 
 
 def test_ignition_threshold_and_ai_timeout_have_defaults(cfg: Config):
-    assert cfg.int("IGNITION_THRESHOLD", 70) == 70
-    assert cfg.float("AI_TIMEOUT_S", 30) == 30.0
-    assert cfg.float("ARM_MIN_SCORE", 68) == 68.0
-    assert cfg.float("CHASE_CAP_PCT", 25.0) == 25.0
+    assert cfg.int("IGNITION_THRESHOLD", 70) == 78
+    assert cfg.float("AI_TIMEOUT_S", 30) == 12.0
+    assert cfg.float("ARM_MIN_SCORE", 68) == 78.0
+    assert cfg.float("CHASE_CAP_PCT", 25.0) == 18.0
 
 
 def test_structure_gate_defaults(cfg: Config):
@@ -36,7 +36,7 @@ def test_config_env_overrides_defaults(tmp_path: Path):
     env.write_text("IGNITION_THRESHOLD=85\nAI_TIMEOUT_S=60\nARM_MIN_SCORE=80\n")
     c = Config(path=env)
     assert c.int("IGNITION_THRESHOLD", 70) == 85
-    assert c.float("AI_TIMEOUT_S", 30) == 60.0
+    assert c.float("AI_TIMEOUT_S", 30) == 60.0  # file value wins
     assert c.float("ARM_MIN_SCORE", 68) == 80.0
 
 
@@ -100,8 +100,8 @@ def test_candidates_overwrite_per_symbol_not_per_tick(tmp_path: Path):
 
 def test_retention_defaults_lowered(tmp_path: Path):
     c = Config(path=tmp_path / "e.env")
-    assert c.int("CAND_RETENTION_HOURS", 2) == 2
-    assert c.int("RAW_RETENTION_HOURS", 2) == 2
+    assert c.int("CAND_RETENTION_HOURS", 2) == 1
+    assert c.int("RAW_RETENTION_HOURS", 2) == 1
     assert c.int("DB_PRUNE_INTERVAL_S", 300) == 300
 
 
