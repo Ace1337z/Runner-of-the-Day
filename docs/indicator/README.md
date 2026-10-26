@@ -19,24 +19,47 @@ If you read nothing else, read these.
 
 ### 1. Read one word from the panel
 
-The top-right panel's first cell is the whole indicator:
+The panel is built for a phone: **one column, three rows**, biggest text on the
+action.
 
 ```
-ENTER          (teal)   →  valid setup, you may take it
-TAKE PROFIT    (green)  →  ATR target or exhaustion hit - take a partial
-EXIT           (maroon) →  trend lost - close the rest
-EXIT NOW       (maroon) →  stop breached - get out
-HOLD / WAIT    (grey)   →  you are in a run, no action needed
-WAIT           (grey)   →  no live run yet
+┌──────────────────┐
+│    TAKE PROFIT   │  <- size.huge, colour-coded
+│ 0.4080  7.4%  0.5160 │  <- stop | risk% | next TP
+│      ready       │  <- the one gate that matters, short
+└──────────────────┘
 ```
 
-The **Why** row underneath names the one gate that is failing
-(`rolling over`, `under VWAP`, `red on the day`, `dead volume`, `weak
-structure`, `vertical since alert`). If Why shows `-`, nothing is failing.
+| Row 1 (action) | Meaning |
+|---|---|
+| **ENTER** (teal) | Valid setup, you may take it |
+| **TAKE PROFIT** (green) | ATR target or exhaustion hit — take a partial |
+| **EXIT** (maroon) | Trend lost — close the rest |
+| **EXIT NOW** (maroon) | Stop breached — get out |
+| **HOLD** (grey) | In a run, nothing to do |
+| **WAIT** (grey) | No live setup yet |
+
+**Row 2 is numbers only, in a fixed order you learn once:** `stop | risk% | next TP`.
+No labels — they would eat half a phone screen.
+
+**Row 3** is the failing gate in two words: `rolling over`, `under vwap`,
+`red day`, `too vertical`, `weak chart`, `dead volume`, `under 9ema`.
+
+### Phone setup
+
+| Setting | Why |
+|---|---|
+| **Panel position** → `top_left` | On a phone the right edge sits under the price scale and the bottom under the buy/sell buttons |
+| **Panel text size** → `huge` | Readable without zooming |
+| **Show the numbers row** → OFF | Panel collapses to one big word — smallest possible footprint |
+
+Chart markers are also phone-sized: **BUY**, a lime ▼ for TP, an **EXH**
+diamond, a red ✕ for exit, and a large **STOP** when you are out on the stop.
+Shapes carry no text where the colour already says it.
 
 **A late alert does not disqualify itself.** The chase cap is measured from the
 bar you could first have acted on, not from the scanner's armed price. If
-Telegram reaches you at +40%, the chart still lets you in - it only refuses a
+Telegram reaches you at +40%, the chart still lets you in — it only refuses a
 name that goes vertical *after* that point.
 
 ### 2. Enter on the aqua ▲ arrow — and only if you're close

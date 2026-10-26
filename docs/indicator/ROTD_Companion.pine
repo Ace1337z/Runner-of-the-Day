@@ -401,13 +401,16 @@ pB2 = plot(showBands ? band2 : na, "+2 sigma", color.new(color.red, 75), 1)
 pB3 = plot(showBands ? band3 : na, "+3 sigma", color.new(color.red, 55), 1)
 fill(pB2, pB3, color.new(color.red, 86), "Climax zone")
 
-plotshape(entryTrig, "ENTRY", shape.triangleup, location.belowbar, color.new(color.aqua, 0), size = size.small, text = "ENTRY", textcolor = color.aqua)
-plotshape(cleanTp and not cleanExh, "TAKE PROFIT", shape.triangledown, location.abovebar, color.new(color.lime, 0), size = size.small, text = "TP", textcolor = color.lime)
+// Markers sized for a phone: shape without text where the colour already says
+// it (TP=downtriangle, EXIT=xcross), text only where a word is needed.
+plotshape(entryTrig, "ENTRY", shape.triangleup, location.belowbar, color.new(color.aqua, 0), size = size.normal, text = "BUY", textcolor = color.aqua)
+plotshape(cleanTp and not cleanExh, "TAKE PROFIT", shape.triangledown, location.abovebar, color.new(color.lime, 0), size = size.normal)
 // Exhaustion: tall bar + heavy volume. Tested to land around 80% of the peak on
 // runners, versus ~48% for an RSI>70 exit - which is why it is a separate marker.
-plotshape(cleanExh, "EXHAUSTION", shape.diamond, location.abovebar, color.new(color.fuchsia, 0), size = size.small, text = "EXH", textcolor = color.fuchsia)
-plotshape(cleanExit, "EXIT", shape.xcross, location.belowbar, color.new(color.red, 0), size = size.small, text = "EXIT", textcolor = color.red)
-plotshape(cleanExit and stopBreached, "STOP", shape.labeldown, location.abovebar, color.new(color.maroon, 0), size = size.small, text = "STOP", textcolor = color.white)
+plotshape(cleanExh, "EXHAUSTION", shape.diamond, location.abovebar, color.new(color.fuchsia, 0), size = size.normal, text = "EXH", textcolor = color.fuchsia)
+// The stop wins the bar: a breached exit draws STOP, not both EXIT and STOP.
+plotshape(cleanExit and not stopBreached, "EXIT", shape.xcross, location.belowbar, color.new(color.red, 0), size = size.normal)
+plotshape(cleanExit and stopBreached, "STOP", shape.xcross, location.belowbar, color.new(color.maroon, 0), size = size.large, text = "STOP", textcolor = color.white)
 
 bgcolor(tradeable ? color.new(color.teal, 92) : na, title = "Tradeable")
 bgcolor(backside and inRun ? color.new(color.red, 88) : na, title = "Backside of HOD")
@@ -417,30 +420,38 @@ bgcolor(backside and inRun ? color.new(color.red, 88) : na, title = "Backside of
 // =============================================================================
 // One word answers the only question that matters at a glance.
 // The detail rows exist for when you want to know WHY.
-var table panel = table.new(position.top_right, 2, 8, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 50))
+// MOBILE-FIRST LAYOUT
+// One column, three rows. A two-column table with labels is ~40% of a phone
+// screen and covers the last candles; numbers without labels are read at a
+// glance once you know the order. The action word is size.huge so it is
+// readable on a 390px-wide screen without zooming.
+panelPos = input.string("top_left", "Panel position", options = ["top_left", "top_right", "middle_left", "middle_right", "bottom_left", "bottom_right"], group = gF, tooltip = "On a phone the right edge sits under the price scale, and the bottom under the buy/sell buttons. top_left is usually clearest.")
+panelSize = input.string("large", "Panel text size", options = ["normal", "large", "huge"], group = gF)
+showDetail = input.bool(true, "Show the numbers row", group = gF, tooltip = "OFF = only the action word. Turn OFF if the panel covers too much on a small screen.")
+
+pos = panelPos == "top_left" ? position.top_left : panelPos == "top_right" ? position.top_right : panelPos == "middle_left" ? position.middle_left : panelPos == "middle_right" ? position.middle_right : panelPos == "bottom_left" ? position.bottom_left : position.bottom_right
+tsize = panelSize == "huge" ? size.huge : panelSize == "large" ? size.large : size.normal
+
+var table panel = table.new(pos, 1, 3, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 50))
 if barstate.islast and showPanel
-    // ACTION: what to do right now, in one word.
-    action = stopBreached ? "EXIT NOW" : cleanExit ? "EXIT" : cleanTp ? "TAKE PROFIT" : tradeable ? "ENTER" : anchored ? "HOLD / WAIT" : "WAIT"
-    actionColor = (stopBreached or cleanExit) ? color.new(color.maroon, 10) : cleanTp ? color.new(color.green, 10) : tradeable ? color.new(color.teal, 10) : color.new(color.gray, 30)
-    // WHY: the first failing gate, or blank when everything passes.
-    why = tradeable or cleanTp or cleanExit or stopBreached ? "" : backside ? "rolling over (>15% off HOD)" : belowVwap ? "under VWAP" : not greenOnDay ? "red on the day" : chaseBlocked ? "vertical since alert" : not structOk ? "weak structure" : not volOk ? "dead volume" : not priceAbove9 ? "under 9 EMA" : anchored ? "" : "no run yet"
+    action = stopBreached ? "EXIT NOW" : cleanExit ? "EXIT" : cleanTp ? "TAKE PROFIT" : tradeable ? "ENTER" : anchorSet ? "HOLD" : "WAIT"
+    actionColor = (stopBreached or cleanExit) ? color.new(color.maroon, 10) : cleanTp ? color.new(color.green, 10) : tradeable ? color.new(color.teal, 10) : color.new(color.gray, 40)
+    // Row 2: numbers only, fixed order you learn once:
+    //   stop | risk% | next TP
     nextTp = not tp1Done ? tp1Level : (not tp2Done ? tp2Level : (not tp3Done ? tp3Level : na))
-    table.cell(panel, 0, 0, "ROTD", text_color = color.white, bgcolor = color.new(color.blue, 30), text_size = size.small)
-    table.cell(panel, 1, 0, action, text_color = color.white, bgcolor = actionColor, text_size = size.normal)
-    table.cell(panel, 0, 1, "Why", text_size = size.small)
-    table.cell(panel, 1, 1, why == "" ? "-" : why, text_size = size.small, text_color = color.gray)
-    table.cell(panel, 0, 2, "Stop", text_size = size.small)
-    table.cell(panel, 1, 2, na(effectiveStop) ? "-" : str.tostring(effectiveStop, format.mintick), text_size = size.small, text_color = color.orange)
-    table.cell(panel, 0, 3, "Risk", text_size = size.small)
-    table.cell(panel, 1, 3, stopBreached ? "breached" : (na(riskPct) ? "-" : str.tostring(riskPct, "#.##") + "%"), text_size = size.small, text_color = stopBreached ? color.red : color.white)
-    table.cell(panel, 0, 4, "Next TP", text_size = size.small)
-    table.cell(panel, 1, 4, na(nextTp) ? "all taken" : str.tostring(nextTp, format.mintick), text_size = size.small, text_color = color.lime)
-    table.cell(panel, 0, 5, "Entry was", text_size = size.small)
-    table.cell(panel, 1, 5, na(anchorPx) ? "-" : str.tostring(anchorPx, format.mintick), text_size = size.small)
-    table.cell(panel, 0, 6, "Mode", text_size = size.small)
-    table.cell(panel, 1, 6, isClimax ? "CLIMAX" : "TREND", text_size = size.small)
-    table.cell(panel, 0, 7, "Since alert", text_size = size.small)
-    table.cell(panel, 1, 7, str.tostring(chasePct, "#.#") + "%", text_size = size.small, text_color = chaseBlocked ? color.red : color.green)
+    stopTxt = na(effectiveStop) ? "-" : str.tostring(effectiveStop, format.mintick)
+    riskTxt = stopBreached ? "HIT" : (na(riskPct) ? "-" : str.tostring(riskPct, "#.#") + "%")
+    tpTxt = na(nextTp) ? "done" : str.tostring(nextTp, format.mintick)
+    numbers = stopTxt + "  " + riskTxt + "  " + tpTxt
+    // Row 3: the one gate that is failing, short form.
+    why = tradeable or cleanTp or cleanExit or stopBreached ? "ready" : backside ? "rolling over" : belowVwap ? "under vwap" : not greenOnDay ? "red day" : chaseBlocked ? "too vertical" : not structOk ? "weak chart" : not volOk ? "dead volume" : not priceAbove9 ? "under 9ema" : anchorSet ? "hold" : "no setup"
+    table.cell(panel, 0, 0, action, text_color = color.white, bgcolor = actionColor, text_size = tsize)
+    if showDetail
+        table.cell(panel, 0, 1, numbers, text_color = color.new(color.white, 0), bgcolor = color.new(color.black, 55), text_size = size.small)
+        table.cell(panel, 0, 2, why, text_color = color.gray, bgcolor = color.new(color.black, 55), text_size = size.small)
+    else
+        table.cell(panel, 0, 1, "", text_size = size.tiny)
+        table.cell(panel, 0, 2, "", text_size = size.tiny)
 
 // =============================================================================
 // 12 . ALERTS
