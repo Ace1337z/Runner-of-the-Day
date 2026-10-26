@@ -17,17 +17,20 @@ Source: [`ROTD_Companion.pine`](ROTD_Companion.pine) · **Won't compile?** → [
 
 If you read nothing else, read these.
 
-### 1. Green HUD or no trade
+### 1. Green status or no trade
 
 The top-right panel's first cell decides everything:
 
 ```
-TRADEABLE                 (green)  →  you may trade
-NO - BACKSIDE OF HOD      (red)    →  setup is dead. Skip.
-NO - TOO EXTENDED         (red)    →  >25% above armed level. Skip.
-NO - BELOW VWAP           (red)    →  scanner aborted this. Skip.
-NO - WEAK STRUCTURE       (red)    →  chart is broken. Skip.
-WAIT                      (red)    →  right stock, wrong moment. Wait.
+TRADEABLE              (green)  →  you may trade
+NO - BACKSIDE OF HOD   (red)    →  >15% off the high. Setup dead.
+NO - BELOW VWAP        (red)    →  under the abort line. Scanner would abort.
+NO - TOO EXTENDED      (red)    →  >25% above where the run started.
+NO - WEAK STRUCTURE    (red)    →  under 4.0/15 structure points.
+NO - RED ON DAY        (red)    →  not green vs previous close.
+NO - DEAD VOLUME       (red)    →  bar below its 20-bar average volume.
+NO - UNDER 9 EMA       (red)    →  momentum has cooled.
+WAIT                   (red)    →  right stock, wrong moment.
 ```
 
 **Anything other than TRADEABLE means no trade.** This single rule prevents most
@@ -37,7 +40,7 @@ losing runner trades.
 
 The arrow prints on the **close** of the first 1-minute bar with every gate green.
 
-Check the HUD row **"Chase from arm"** before you buy:
+Check the **Chase** row in the status panel before you buy:
 
 | Value | Action |
 |---|---|
@@ -51,7 +54,7 @@ If you opened the chart late and price has already run — **pass**. Another ale
 
 Put a real stop order at the **"Stop in use"** price. Not a mental stop.
 
-- **"Risk %"** on the HUD tells you your loss from here.
+- **"Risk %"** in the status panel tells you your loss from here.
 - Position size = *(money you accept losing)* ÷ *(Risk % / 100)*.
 
 > If Risk % looks wide (e.g. 8–11%), **size down**. Do not tighten the stop below the line — normal noise will eject you.
@@ -176,26 +179,27 @@ Nothing above needs typing, and nothing can drift from the server.
 | **STOP** maroon | Stop breached — exit now |
 | ◆ orange **VWAP** | Lost VWAP — early warning |
 
-### HUD (top-right)
+### Status panel (top-right)
 
 | Field | Use it for |
 |---|---|
-| **Tape score** | 0–100 momentum, **for information only** — not a gate |
+| **Status** | The verdict. `TRADEABLE`, or exactly which gate is failing |
+| **Price** | Current price |
+| **Stop in use** | Where your order goes |
+| **Risk %** | Sizing — your loss to the stop. Shows `STOP HIT - EXIT` once breached |
 | **Mode** | TREND (loose trail) or CLIMAX (tight trail) |
-| **Hard stop / Stop in use** | Where your order goes |
-| **Risk %** | Sizing — your loss to the stop |
 | **Stretch vs VWAP** | Above 16% = TP territory |
-| **Structure pts** | /15. Below 4.0 = not tradeable |
-| **Chase from arm** | Anti-FOMO gauge |
+| **Structure** | /15. Below 4.0 = not tradeable |
+| **Chase** | % above where the run started. Red past 25% |
 | **RVOL** | Volume vs same time on prior days |
 
 ---
 
 ## Worked example
 
-Telegram: `ROTD IGNITION — $ABCD @ 2.05 | Score 73`
+Telegram: `ROTD IGNITION — $ABCD @ 2.05`
 
-1. **Open $ABCD 1-min.** HUD: ✅ TRADEABLE, score 71, RVOL 4.2x, structure 9.1/15, chase 3%
+1. **Open $ABCD 1-min.** Status: **TRADEABLE** · RVOL 4.2x · structure 9.1/15 · chase 3%
 2. **▲ ENTRY at 2.08.** Buy 1,000 sh = $2,080
 3. **Stop in use = 1.92.** Risk = 7.7% = $160. Place the order
 4. **+16% → ▼ TP at 2.42.** Sell 400 sh. Now a stop-out is roughly break-even
@@ -219,7 +223,7 @@ Not perfect — but uncatchable as a loser.
 
 ## Rules that keep you profitable
 
-1. **No green HUD, no trade.** Non-negotiable.
+1. **No green status, no trade.** Non-negotiable.
 2. **Stop in before you look at targets.**
 3. **Pass on extended entries.** There is always another alert.
 4. **Take the first partial** — especially when it feels too early.
@@ -257,7 +261,7 @@ Not perfect — but uncatchable as a loser.
 ```
 ALERT ARRIVES  →  open 1-min chart
         ↓
-HUD GREEN?     →  NO  →  skip, wait for next alert
+TRADEABLE?     →  NO  →  skip, wait for next alert
         ↓ YES
 AQUA ARROW     →  enter at close / next open
         ↓
