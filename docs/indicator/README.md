@@ -17,24 +17,27 @@ Source: [`ROTD_Companion.pine`](ROTD_Companion.pine) · **Won't compile?** → [
 
 If you read nothing else, read these.
 
-### 1. Green status or no trade
+### 1. Read one word from the panel
 
-The top-right panel's first cell decides everything:
+The top-right panel's first cell is the whole indicator:
 
 ```
-TRADEABLE              (green)  →  you may trade
-NO - BACKSIDE OF HOD   (red)    →  >15% off the high. Setup dead.
-NO - BELOW VWAP        (red)    →  under the abort line. Scanner would abort.
-NO - TOO EXTENDED      (red)    →  >25% above where the run started.
-NO - WEAK STRUCTURE    (red)    →  under 4.0/15 structure points.
-NO - RED ON DAY        (red)    →  not green vs previous close.
-NO - DEAD VOLUME       (red)    →  bar below its 20-bar average volume.
-NO - UNDER 9 EMA       (red)    →  momentum has cooled.
-WAIT                   (red)    →  right stock, wrong moment.
+ENTER          (teal)   →  valid setup, you may take it
+TAKE PROFIT    (green)  →  ATR target or exhaustion hit - take a partial
+EXIT           (maroon) →  trend lost - close the rest
+EXIT NOW       (maroon) →  stop breached - get out
+HOLD / WAIT    (grey)   →  you are in a run, no action needed
+WAIT           (grey)   →  no live run yet
 ```
 
-**Anything other than TRADEABLE means no trade.** This single rule prevents most
-losing runner trades.
+The **Why** row underneath names the one gate that is failing
+(`rolling over`, `under VWAP`, `red on the day`, `dead volume`, `weak
+structure`, `vertical since alert`). If Why shows `-`, nothing is failing.
+
+**A late alert does not disqualify itself.** The chase cap is measured from the
+bar you could first have acted on, not from the scanner's armed price. If
+Telegram reaches you at +40%, the chart still lets you in - it only refuses a
+name that goes vertical *after* that point.
 
 ### 2. Enter on the aqua ▲ arrow — and only if you're close
 

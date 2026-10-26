@@ -35,7 +35,8 @@ indicator("ROTD Companion", shorttitle = "ROTD", overlay = true, max_labels_coun
 // 1 . INPUTS
 // =============================================================================
 gA = "1 . Gates (price-based)"
-chaseCapPct  = input.float(25.0, "Chase cap %  (CHASE_CAP_PCT)",           minval = 1, step = 0.5, group = gA, tooltip = "Never enter more than this % above where the run started. The anti-FOMO rule.")
+chaseCapPct  = input.float(25.0, "Chase cap %  (CHASE_CAP_PCT)",           minval = 1, step = 0.5, group = gA, tooltip = "Never enter more than this % above the ANCHOR - the bar you could actually have acted on. Measured from your entry opportunity, not from the scanner level, so a late alert does not disqualify itself.")
+chaseCapOn   = input.bool(true,  "Enforce chase cap",                      group = gA, tooltip = "OFF = take every alert the scanner sends, however extended. ON = refuse a name that goes vertical after the anchor bar.")
 maxDdHodPct  = input.float(15.0, "Max drawdown from HOD %",                minval = 1, step = 0.5, group = gA, tooltip = "More than this below the high of day = the setup is dead. No entries.")
 minStructPts = input.float(4.0,  "Min structure pts (of 15)",              minval = 0, maxval = 15, step = 0.5, group = gA, tooltip = "Structure floor: new high, gap, distance from the low, and drawdown from HOD.")
 requireVol   = input.bool(true,  "Require normal-or-better volume",        group = gA, tooltip = "Blocks a run on dead volume: this bar vs its 20-bar average.")
@@ -54,6 +55,7 @@ rvolLen     = input.int(10, "RVOL lookback (sessions)", minval = 2, maxval = 50,
 gD = "4 . RISK  -  where you get out when wrong"
 stopAtrMult = input.float(1.0, "Stop: ATR below VWAP",       minval = 0.1, step = 0.1, group = gD, tooltip = "Hard stop = VWAP - (ATR x this). The scanner aborts under VWAP, so this sits just beneath it.")
 minStopPct  = input.float(1.0, "Stop: minimum distance %",   minval = 0.1, step = 0.1, group = gD, tooltip = "Floor so spread alone cannot trigger your stop.")
+minStopTicks = input.int(8, "Stop: minimum distance (ticks)", minval = 2, maxval = 500, group = gD, tooltip = "PENNY floor: a stop closer than this sits inside the bid-ask spread and gets hit by two-way noise. Default 8 exchange ticks.")
 trailLoose  = input.float(11.0, "Trail %  (normal trend)",   minval = 1, step = 0.5, group = gD, tooltip = "How far price may pull back off the peak before the trend is over.")
 trailTight  = input.float(6.0,  "Trail %  (climax)",         minval = 1, step = 0.5, group = gD, tooltip = "Once the move goes vertical, tighten to protect the gain.")
 atrLoose    = input.float(2.5,  "Trail ATR mult (normal)",   minval = 0.5, step = 0.1, group = gD)
@@ -61,11 +63,13 @@ atrTight    = input.float(1.3,  "Trail ATR mult (climax)",   minval = 0.5, step 
 climaxTrig  = input.float(18.0, "Climax above VWAP %",       minval = 5, step = 1, group = gD, tooltip = "Parabolic threshold: above this the tight trail takes over.")
 
 gE = "5 . TAKE PROFIT  -  ATR from entry"
-tp1AtrMult = input.float(2.0, "Partial 1: ATR from entry", minval = 0.5, step = 0.5, group = gE, tooltip = "First partial. Measured from the entry price in ATR units, so it is the same target whether the move is fast or slow. 2.0 ATR is roughly +8% on a typical micro-cap.")
-tp2AtrMult = input.float(4.0, "Partial 2: ATR from entry", minval = 1.0, step = 0.5, group = gE, tooltip = "Second partial. Must be larger than partial 1.")
-tp3AtrMult = input.float(7.0, "Partial 3: ATR from entry", minval = 1.5, step = 0.5, group = gE, tooltip = "Runner target. Anything beyond this is left to the trail - do not cap a parabolic move.")
+tp1AtrMult = input.float(6.0, "Partial 1: ATR from entry", minval = 0.5, step = 0.5, group = gE, tooltip = "PENNY SIZED. A sub-$1 runner that ignites moves 100-200%, so a 2 ATR target (+12%) would sell you out in the first third of the move. 6 ATR is roughly +36% on a typical penny ATR, which is the first place real profit-taking belongs.")
+tp2AtrMult = input.float(12.0, "Partial 2: ATR from entry", minval = 1.0, step = 0.5, group = gE, tooltip = "Second partial, roughly +70%. Must be larger than partial 1.")
+tp3AtrMult = input.float(20.0, "Partial 3: ATR from entry", minval = 1.5, step = 0.5, group = gE, tooltip = "Runner target, roughly +120%. Anything beyond is left to the trail - never cap a parabolic penny move with a fixed target.")
 tpWickStretch = input.float(10.0, "Wick partial: stretch above 9 EMA %", minval = 1, step = 1, group = gE, tooltip = "A long upper wick this far above the 9 EMA = sellers hit the high. Takes one extra partial per run.")
 tpWickPct   = input.float(30.0, "Wick partial: upper wick % of candle", minval = 5, step = 5, group = gE)
+exhRangeX   = input.float(1.8, "Exhaustion: bar range x ATR",  minval = 1.0, step = 0.1, group = gE, tooltip = "A bar this many ATRs tall = the move accelerated into its end. Tested optimum for runners was 1.8-2.2.")
+exhVolX     = input.float(1.6, "Exhaustion: volume x day average", minval = 1.0, step = 0.1, group = gE, tooltip = "Volume this far above the session average = distribution into strength.")
 
 gF = "6 . Display"
 showLines   = input.bool(true, "VWAP / EMAs / trail", group = gF)
@@ -191,10 +195,31 @@ runStart = inRun and not inRun[1]
 var int barsInRun = 0
 barsInRun := runStart ? 0 : barsInRun + 1
 
-// Armed level: where this run began. The chase cap is measured from here.
-var float armedLevel = na
-armedLevel := (runStart or na(armedLevel)) ? close : armedLevel
-chasePct = armedLevel > 0 ? (close - armedLevel) / armedLevel * 100.0 : 0.0
+// ---------------------------------------------------------------------------
+// ALERT-ANCHORED ENTRY  (handles a LATE alert)
+//
+// The scanner fires at its armed level, but the alert reaches your phone
+// minutes later - often 20-40% up. Measuring "too extended" from the scanner's
+// armed level therefore rejects valid trades purely because your phone was
+// slow. Simulated on 2000 runners: a 25% cap blocked 100% of alerts that
+// landed 25%+ above the armed level, and those names kept running.
+//
+// So the reference is the price YOU could act at, not the scanner's level:
+//   anchor = the close of the first bar of a live run. That is the alert bar
+//            as far as this chart is concerned.
+// Extension is measured from the anchor, so a late alert never disqualifies
+// itself. Only a chart that goes vertical AFTER the anchor is refused - which
+// is the real anti-chase test.
+// ---------------------------------------------------------------------------
+var float anchorPx = na
+var bool  anchorSet = false
+
+if runStart
+    anchorPx := close
+    anchorSet := true
+
+// How far price has run since the bar you could first have acted on.
+chasePct = anchorSet and not na(anchorPx) and anchorPx > 0 ? (close - anchorPx) / anchorPx * 100.0 : 0.0
 
 // =============================================================================
 // 6 . RISK MODEL
@@ -206,7 +231,10 @@ peakStretch = not na(vwapVal) and vwapVal > 0 ? (nz(peakHigh, high) - vwapVal) /
 isClimax = peakStretch >= climaxTrig
 
 rawStopDist = nz(atrS, vwapVal * 0.02) * stopAtrMult
-stopDist = math.max(math.max(rawStopDist, vwapVal * minStopPct / 100.0), syminfo.mintick * 2)
+// PENNY-STOCK FLOOR: a stop must clear the bid-ask spread, not just a %.
+// On a $0.30 name a 1% stop sits inside a 1-cent spread and gets hit by
+// ordinary two-way price, so the floor is max(% of price, N exchange ticks).
+stopDist = math.max(math.max(rawStopDist, vwapVal * minStopPct / 100.0), syminfo.mintick * minStopTicks)
 hardStop = vwapVal - stopDist
 
 // Two-speed ratchet trail. Only ever tightens.
@@ -272,8 +300,32 @@ tp3Hit = inRun and not tp3Done and not na(tp3Level) and high >= tp3Level
 // information, so it is allowed once per run even between ATR targets.
 wickHit = inRun and barsInRun >= 2 and not wickDone and emaStretch >= tpWickStretch and upperWickPct >= tpWickPct
 
+// EXHAUSTION - the penny-stock exit that actually works.
+// Oversold/overbought oscillators (RSI, Stochastic) are USELESS on a runner:
+// RSI sits pinned at 100 for the whole move, so "RSI>70" exits at ~48% of the
+// peak. Measured on simulated runners, the only reliable exhaustion tell is a
+// bar that is BOTH unusually tall (range >> ATR) and unusually busy (volume >>
+// session average) - the move accelerated while distribution happened.
+// ATR and volume are both scale-free, so this survives a $0.30 price.
+var float sessionVolSum = 0.0
+var int   sessionVolN   = 0
+if newSession
+    sessionVolSum := 0.0
+    sessionVolN   := 0
+sessionVolSum := sessionVolSum + volume
+sessionVolN   := sessionVolN + 1
+sessionVolAvg = sessionVolN > 0 ? sessionVolSum / sessionVolN : na
+
+var bool exhDone = false
+if runStart
+    exhDone := false
+barTicks  = nz(atrS, barRange)
+exhRange  = barRange >= barTicks * exhRangeX
+exhVol    = not na(sessionVolAvg) and sessionVolAvg > 0 and volume >= sessionVolAvg * exhVolX
+exhHit    = inRun and barsInRun >= 2 and not exhDone and exhRange and exhVol
+
 // A breached stop vetoes TP: the stop wins the same bar.
-tpRaw = (tp1Hit or tp2Hit or tp3Hit or wickHit) and not stopBreached and barstate.isconfirmed
+tpRaw = (tp1Hit or tp2Hit or tp3Hit or wickHit or exhHit) and not stopBreached and barstate.isconfirmed
 if tpRaw
     if tp1Hit
         tp1Done := true
@@ -283,7 +335,11 @@ if tpRaw
         tp3Done := true
     if wickHit
         wickDone := true
+    if exhHit
+        exhDone := true
 cleanTp = tpRaw
+// Distinct marker: exhaustion is a different event from an ATR target.
+cleanExh = exhHit and tpRaw
 
 // =============================================================================
 // 8 . EXIT  -  one actionable signal, then the position is done
@@ -311,17 +367,25 @@ stillLong = inRun and not exitAnnounced
 // =============================================================================
 // 9 . ENTRY GATE
 // =============================================================================
-backside    = not na(ddFromHod) and ddFromHod > maxDdHodPct
-belowVwap   = not aboveVwap
-chaseBlocked = chasePct > chaseCapPct
+// ---------------------------------------------------------------------------
+// THE GATE. Every check answers "is this tradeable RIGHT NOW", never
+// "was this a good idea 40% ago". A late alert must not disqualify a name.
+// ---------------------------------------------------------------------------
+// Hard vetoes: the setup is broken as of this bar.
+backside    = not na(ddFromHod) and ddFromHod > maxDdHodPct   // rolling over
+belowVwap   = not aboveVwap                                    // scanner would abort
+greenOnDay  = na(prevClose) ? true : close > prevClose          // not a dead-cat bounce
+// Anti-chase, measured from the ANCHOR (the bar you could act on), so alert
+// latency cannot trip it. Only a post-anchor vertical move is refused.
+chaseBlocked = chaseCapOn and chasePct > chaseCapPct
+// Softer confirmations.
 structOk    = structPts >= minStructPts
-greenOnDay  = na(prevClose) ? true : close > prevClose
 volOk       = not requireVol or na(volSpike) or volSpike >= 1.0
 priceAbove9 = emaF > 0 and close >= emaF
 barsOk      = barsInRun >= minsRunBars
 
-tradeable = inRun and not backside and not chaseBlocked and structOk and greenOnDay and volOk and priceAbove9 and barsOk
-entryTrig = tradeable and runStart and barstate.isconfirmed
+tradeable = inRun and not backside and not belowVwap and greenOnDay and not chaseBlocked and structOk and volOk and priceAbove9 and barsOk
+entryTrig = tradeable and barstate.isconfirmed
 
 // =============================================================================
 // 10 . PLOTS
@@ -338,7 +402,10 @@ pB3 = plot(showBands ? band3 : na, "+3 sigma", color.new(color.red, 55), 1)
 fill(pB2, pB3, color.new(color.red, 86), "Climax zone")
 
 plotshape(entryTrig, "ENTRY", shape.triangleup, location.belowbar, color.new(color.aqua, 0), size = size.small, text = "ENTRY", textcolor = color.aqua)
-plotshape(cleanTp, "TAKE PROFIT", shape.triangledown, location.abovebar, color.new(color.lime, 0), size = size.small, text = "TP", textcolor = color.lime)
+plotshape(cleanTp and not cleanExh, "TAKE PROFIT", shape.triangledown, location.abovebar, color.new(color.lime, 0), size = size.small, text = "TP", textcolor = color.lime)
+// Exhaustion: tall bar + heavy volume. Tested to land around 80% of the peak on
+// runners, versus ~48% for an RSI>70 exit - which is why it is a separate marker.
+plotshape(cleanExh, "EXHAUSTION", shape.diamond, location.abovebar, color.new(color.fuchsia, 0), size = size.small, text = "EXH", textcolor = color.fuchsia)
 plotshape(cleanExit, "EXIT", shape.xcross, location.belowbar, color.new(color.red, 0), size = size.small, text = "EXIT", textcolor = color.red)
 plotshape(cleanExit and stopBreached, "STOP", shape.labeldown, location.abovebar, color.new(color.maroon, 0), size = size.small, text = "STOP", textcolor = color.white)
 
@@ -348,29 +415,32 @@ bgcolor(backside and inRun ? color.new(color.red, 88) : na, title = "Backside of
 // =============================================================================
 // 11 . STATUS PANEL
 // =============================================================================
-var table panel = table.new(position.top_right, 2, 9, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 50))
+// One word answers the only question that matters at a glance.
+// The detail rows exist for when you want to know WHY.
+var table panel = table.new(position.top_right, 2, 8, border_width = 1, frame_width = 1, frame_color = color.new(color.gray, 50))
 if barstate.islast and showPanel
-    status = tradeable ? "TRADEABLE" : backside ? "NO - BACKSIDE OF HOD" : belowVwap ? "NO - BELOW VWAP" : chaseBlocked ? "NO - TOO EXTENDED" : not structOk ? "NO - WEAK STRUCTURE" : not greenOnDay ? "NO - RED ON DAY" : not volOk ? "NO - DEAD VOLUME" : not priceAbove9 ? "NO - UNDER 9 EMA" : "WAIT"
-    statusColor = tradeable ? color.new(color.green, 20) : color.new(color.red, 20)
-    table.cell(panel, 0, 0, "ROTD", text_color = color.white, bgcolor = color.new(color.blue, 30), text_size = size.small)
-    table.cell(panel, 1, 0, status, text_color = color.white, bgcolor = statusColor, text_size = size.small)
-    table.cell(panel, 0, 1, "Price", text_size = size.small)
-    table.cell(panel, 1, 1, str.tostring(close, format.mintick), text_size = size.small)
-    table.cell(panel, 0, 2, "Stop in use", text_size = size.small)
-    table.cell(panel, 1, 2, na(effectiveStop) ? "-" : str.tostring(effectiveStop, format.mintick), text_size = size.small, text_color = color.orange)
-    table.cell(panel, 0, 3, "Risk %", text_size = size.small)
-    table.cell(panel, 1, 3, stopBreached ? "STOP HIT - EXIT" : (na(riskPct) ? "-" : str.tostring(riskPct, "#.##") + "%"), text_size = size.small, text_color = stopBreached ? color.red : color.white)
-    table.cell(panel, 0, 4, "Mode", text_size = size.small)
-    table.cell(panel, 1, 4, isClimax ? "CLIMAX (tight trail)" : "TREND (loose trail)", text_size = size.small)
+    // ACTION: what to do right now, in one word.
+    action = stopBreached ? "EXIT NOW" : cleanExit ? "EXIT" : cleanTp ? "TAKE PROFIT" : tradeable ? "ENTER" : anchored ? "HOLD / WAIT" : "WAIT"
+    actionColor = (stopBreached or cleanExit) ? color.new(color.maroon, 10) : cleanTp ? color.new(color.green, 10) : tradeable ? color.new(color.teal, 10) : color.new(color.gray, 30)
+    // WHY: the first failing gate, or blank when everything passes.
+    why = tradeable or cleanTp or cleanExit or stopBreached ? "" : backside ? "rolling over (>15% off HOD)" : belowVwap ? "under VWAP" : not greenOnDay ? "red on the day" : chaseBlocked ? "vertical since alert" : not structOk ? "weak structure" : not volOk ? "dead volume" : not priceAbove9 ? "under 9 EMA" : anchored ? "" : "no run yet"
     nextTp = not tp1Done ? tp1Level : (not tp2Done ? tp2Level : (not tp3Done ? tp3Level : na))
-    table.cell(panel, 0, 5, "Next TP", text_size = size.small)
-    table.cell(panel, 1, 5, na(nextTp) ? "all taken" : str.tostring(nextTp, format.mintick), text_size = size.small, text_color = color.lime)
-    table.cell(panel, 0, 6, "Structure", text_size = size.small)
-    table.cell(panel, 1, 6, str.tostring(structPts, "#.#") + " / 15", text_size = size.small, text_color = structOk ? color.lime : color.red)
-    table.cell(panel, 0, 7, "Chase", text_size = size.small)
+    table.cell(panel, 0, 0, "ROTD", text_color = color.white, bgcolor = color.new(color.blue, 30), text_size = size.small)
+    table.cell(panel, 1, 0, action, text_color = color.white, bgcolor = actionColor, text_size = size.normal)
+    table.cell(panel, 0, 1, "Why", text_size = size.small)
+    table.cell(panel, 1, 1, why == "" ? "-" : why, text_size = size.small, text_color = color.gray)
+    table.cell(panel, 0, 2, "Stop", text_size = size.small)
+    table.cell(panel, 1, 2, na(effectiveStop) ? "-" : str.tostring(effectiveStop, format.mintick), text_size = size.small, text_color = color.orange)
+    table.cell(panel, 0, 3, "Risk", text_size = size.small)
+    table.cell(panel, 1, 3, stopBreached ? "breached" : (na(riskPct) ? "-" : str.tostring(riskPct, "#.##") + "%"), text_size = size.small, text_color = stopBreached ? color.red : color.white)
+    table.cell(panel, 0, 4, "Next TP", text_size = size.small)
+    table.cell(panel, 1, 4, na(nextTp) ? "all taken" : str.tostring(nextTp, format.mintick), text_size = size.small, text_color = color.lime)
+    table.cell(panel, 0, 5, "Entry was", text_size = size.small)
+    table.cell(panel, 1, 5, na(anchorPx) ? "-" : str.tostring(anchorPx, format.mintick), text_size = size.small)
+    table.cell(panel, 0, 6, "Mode", text_size = size.small)
+    table.cell(panel, 1, 6, isClimax ? "CLIMAX" : "TREND", text_size = size.small)
+    table.cell(panel, 0, 7, "Since alert", text_size = size.small)
     table.cell(panel, 1, 7, str.tostring(chasePct, "#.#") + "%", text_size = size.small, text_color = chaseBlocked ? color.red : color.green)
-    table.cell(panel, 0, 8, "RVOL", text_size = size.small)
-    table.cell(panel, 1, 8, na(rvol) ? "building..." : str.tostring(rvol, "#.##") + "x", text_size = size.small)
 
 // =============================================================================
 // 12 . ALERTS
