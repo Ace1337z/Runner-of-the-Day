@@ -65,11 +65,21 @@ TP is a **ladder**, not one exit:
 
 | Signal | Do this |
 |---|---|
-| 1st ▼ TP (+16% above VWAP) | Sell **⅓–½** |
-| 2nd ▼ TP (long upper wick) | Sell **⅓** |
-| 3rd ▼ TP | Optional — keep a runner |
+| 1st ▼ TP — **2 ATR from entry** | Sell **⅓–½** |
+| 2nd ▼ TP — **4 ATR from entry** | Sell **⅓** |
+| 3rd ▼ TP — **7 ATR from entry** | Optional — keep a runner |
+| Extra ▼ TP — long upper wick | Sell a partial if you still hold |
 
-Taking the first partial means a reversal can no longer hurt you, while the rest can still ride a +35% move. **Greed at +16% is the classic runner killer.**
+Targets are measured in **ATR from your entry price**, frozen when the run
+starts. That is deliberate: an earlier version used "+16% above VWAP", but
+VWAP follows price upward — a fast spike blew through it on bar 2, and a slow
+grind let VWAP catch up and **never** reached it. A stock that doubled could
+show zero TPs. ATR does not drift, so the same run shape gives the same target
+whether it takes 5 bars or 40.
+
+Each level fires **once per run**, so the chart stops repainting the same
+signal. Taking the first partial means a reversal can no longer hurt you, while
+the rest can still ride the parabolic part.
 
 ### 5. Never lower the stop. Ever.
 
@@ -188,7 +198,7 @@ Nothing above needs typing, and nothing can drift from the server.
 | **Stop in use** | Where your order goes |
 | **Risk %** | Sizing — your loss to the stop. Shows `STOP HIT - EXIT` once breached |
 | **Mode** | TREND (loose trail) or CLIMAX (tight trail) |
-| **Stretch vs VWAP** | Above 16% = TP territory |
+| **Next TP** | The next ATR target price. `all taken` once all three fire |
 | **Structure** | /15. Below 4.0 = not tradeable |
 | **Chase** | % above where the run started. Red past 25% |
 | **RVOL** | Volume vs same time on prior days |
@@ -202,8 +212,8 @@ Telegram: `ROTD IGNITION — $ABCD @ 2.05`
 1. **Open $ABCD 1-min.** Status: **TRADEABLE** · RVOL 4.2x · structure 9.1/15 · chase 3%
 2. **▲ ENTRY at 2.08.** Buy 1,000 sh = $2,080
 3. **Stop in use = 1.92.** Risk = 7.7% = $160. Place the order
-4. **+16% → ▼ TP at 2.42.** Sell 400 sh. Now a stop-out is roughly break-even
-5. **CLIMAX mode.** Trail tightens. ▼ TP at 2.60 → sell 300
+4. **▼ TP1 at 2.16 (2 ATR).** Sell 400 sh. Now a stop-out is roughly break-even
+5. **CLIMAX mode.** Trail tightens. ▼ TP2 at 2.32 → sell 300
 6. **Price rolls to 2.44, breaks trail → ✕ EXIT.** Sell last 300
 
 Averaged ≈ **+18%** on a move that peaked at +31%, with no path to a loss.
@@ -267,8 +277,8 @@ AQUA ARROW     →  enter at close / next open
         ↓
 PLACE STOP     →  "Stop in use" (real order)
         ↓
-1st ▼ TP       →  sell 1/3 to 1/2
-2nd ▼ TP       →  sell 1/3
+1st ▼ TP       →  sell 1/3 to 1/2   (2 ATR)
+2nd ▼ TP       →  sell 1/3           (4 ATR)
         ↓
 ✕ EXIT / STOP  →  out of the rest
 ```

@@ -60,11 +60,12 @@ atrLoose    = input.float(2.5,  "Trail ATR mult (normal)",   minval = 0.5, step 
 atrTight    = input.float(1.3,  "Trail ATR mult (climax)",   minval = 0.5, step = 0.1, group = gD)
 climaxTrig  = input.float(18.0, "Climax above VWAP %",       minval = 5, step = 1, group = gD, tooltip = "Parabolic threshold: above this the tight trail takes over.")
 
-gE = "5 . TAKE PROFIT  -  where you sell"
-tpHard      = input.float(16.0, "Partial at this % above VWAP", minval = 1, step = 1, group = gE, tooltip = "Take a third to a half off once this extended. Greed at the top is the classic runner killer.")
-tpWickStretch = input.float(10.0, "Wick TP: stretch above 9 EMA %", minval = 1, step = 1, group = gE)
-tpWickPct   = input.float(25.0, "Wick TP: upper wick % of candle", minval = 5, step = 5, group = gE)
-tpBarAtr    = input.float(2.2,  "Blow-off TP: bar range x ATR", minval = 1, step = 0.1, group = gE)
+gE = "5 . TAKE PROFIT  -  ATR from entry"
+tp1AtrMult = input.float(2.0, "Partial 1: ATR from entry", minval = 0.5, step = 0.5, group = gE, tooltip = "First partial. Measured from the entry price in ATR units, so it is the same target whether the move is fast or slow. 2.0 ATR is roughly +8% on a typical micro-cap.")
+tp2AtrMult = input.float(4.0, "Partial 2: ATR from entry", minval = 1.0, step = 0.5, group = gE, tooltip = "Second partial. Must be larger than partial 1.")
+tp3AtrMult = input.float(7.0, "Partial 3: ATR from entry", minval = 1.5, step = 0.5, group = gE, tooltip = "Runner target. Anything beyond this is left to the trail - do not cap a parabolic move.")
+tpWickStretch = input.float(10.0, "Wick partial: stretch above 9 EMA %", minval = 1, step = 1, group = gE, tooltip = "A long upper wick this far above the 9 EMA = sellers hit the high. Takes one extra partial per run.")
+tpWickPct   = input.float(30.0, "Wick partial: upper wick % of candle", minval = 5, step = 5, group = gE)
 
 gF = "6 . Display"
 showLines   = input.bool(true, "VWAP / EMAs / trail", group = gF)
@@ -224,52 +225,89 @@ riskPct       = close > 0 ? (close - effectiveStop) / close * 100.0 : na
 stopBreached  = not na(effectiveStop) and close < effectiveStop
 
 // =============================================================================
-// 7 . TAKE PROFIT  (ladder - partials into strength)
+// 7 . TAKE PROFIT  -  measured in ATR from the ENTRY, not % above a moving line
+//
+//  The old test was "price >= VWAP * 1.16". VWAP follows price upward, so a
+//  fast spike blew through it on bar 2 (too early) while a slow grind let VWAP
+//  catch up and NEVER reached it. A stock that doubled could show zero TPs.
+//
+//  ATR is fixed when the run starts, so a target measured from the entry price
+//  is the same target no matter how fast or slow the move is:
+//      TP1 = entry + 2.0 ATR      (first partial: take the edge off)
+//      TP2 = entry + 4.0 ATR      (second partial)
+//      TP3 = entry + 7.0 ATR      (runner - the trail handles the rest)
+//  Each fires ONCE per run, so the chart stops painting the same signal twice.
+//  A distribution wick can also take a partial early - that is real information
+//  (sellers hit the high), not a re-fire of the same event.
 // =============================================================================
-emaStretch   = emaF > 0 ? (high - emaF) / emaF * 100.0 : 0.0
-vwapStretch  = vwapVal > 0 ? (high - vwapVal) / vwapVal * 100.0 : 0.0
 barRange     = high - low
 upperWickPct = barRange > 0 ? (high - close) / barRange * 100.0 : 0.0
-enoughBars   = barsInRun >= 2
+emaStretch   = emaF > 0 ? (high - emaF) / emaF * 100.0 : 0.0
 
-var bool blowUsed = false
-var bool hardUsed = false
+// Freeze entry and ATR at the start of the run. Never recomputed mid-run, so
+// targets cannot drift under you.
+var float entryPx  = na
+var float entryAtr = na
+var bool  tp1Done  = false
+var bool  tp2Done  = false
+var bool  tp3Done  = false
+var bool  wickDone = false
 if runStart
-    blowUsed := false
-    hardUsed := false
+    entryPx  := close
+    entryAtr := nz(atrS, close * 0.02)
+    tp1Done  := false
+    tp2Done  := false
+    tp3Done  := false
+    wickDone := false
 
-tpWick    = inRun and enoughBars and emaStretch >= tpWickStretch and vwapStretch >= tpHard and upperWickPct >= tpWickPct
-tpBlowoff = inRun and enoughBars and not blowUsed and vwapStretch >= tpHard and barRange >= nz(atrS, barRange) * tpBarAtr
-tpHardTp  = inRun and enoughBars and not hardUsed and close >= vwapVal * (1.0 + tpHard / 100.0) and upperWickPct < 50.0
+tp1Level = na(entryPx) ? na : entryPx + entryAtr * tp1AtrMult
+tp2Level = na(entryPx) ? na : entryPx + entryAtr * tp2AtrMult
+tp3Level = na(entryPx) ? na : entryPx + entryAtr * tp3AtrMult
+
+// One shot per level per run.
+tp1Hit = inRun and not tp1Done and not na(tp1Level) and high >= tp1Level
+tp2Hit = inRun and not tp2Done and not na(tp2Level) and high >= tp2Level
+tp3Hit = inRun and not tp3Done and not na(tp3Level) and high >= tp3Level
+// A long upper wick while stretched = sellers hitting the high. Independent
+// information, so it is allowed once per run even between ATR targets.
+wickHit = inRun and barsInRun >= 2 and not wickDone and emaStretch >= tpWickStretch and upperWickPct >= tpWickPct
 
 // A breached stop vetoes TP: the stop wins the same bar.
-tpRaw = (tpWick or tpBlowoff or tpHardTp) and not stopBreached and barstate.isconfirmed
+tpRaw = (tp1Hit or tp2Hit or tp3Hit or wickHit) and not stopBreached and barstate.isconfirmed
 if tpRaw
-    if tpBlowoff
-        blowUsed := true
-    if tpHardTp
-        hardUsed := true
+    if tp1Hit
+        tp1Done := true
+    if tp2Hit
+        tp2Done := true
+    if tp3Hit
+        tp3Done := true
+    if wickHit
+        wickDone := true
+cleanTp = tpRaw
 
 // =============================================================================
-// 8 . EXIT
+// 8 . EXIT  -  one actionable signal, then the position is done
+//
+//  The exit is the stop. Before the trail exists that is VWAP - the scanner's
+//  own abort line. Once the trail ratchets above VWAP it becomes the exit and
+//  locks in profit. The old version ALSO painted a STOP label on every bar the
+//  stop stayed breached (11 labels in 14 bars); the run-exit flag below makes
+//  it exactly one signal per run, which is all that is actionable.
 // =============================================================================
-runExtended = not na(vwapVal) and vwapVal > 0 and (ta.highest(high, 10) - vwapVal) / vwapVal * 100.0 >= 8.0
-lostStop    = not na(effectiveStop[1]) and close < effectiveStop[1]
-lostVwap    = ta.crossunder(close, vwapVal)
+lostStop = not na(effectiveStop[1]) and close < effectiveStop[1]
+lostVwap = ta.crossunder(close, vwapVal)
 
-exitRaw = runExtended and (lostStop or lostVwap) and barstate.isconfirmed
+// exitAnnounced: one exit label per run. Cleared only when a NEW run starts.
+var bool exitAnnounced = false
+exitRaw = (lostStop or lostVwap) and barstate.isconfirmed
+cleanExit = exitRaw and not exitAnnounced and not cleanTp
+if cleanExit
+    exitAnnounced := true
+if runStart
+    exitAnnounced := false
 
-// Cooldowns count bars since the last ACCEPTED signal, not the raw condition.
-var int sinceExit = 999
-var int sinceTp   = 999
-cleanExit = exitRaw and sinceExit > 8 and not tpRaw
-cleanTp   = tpRaw and sinceTp > 6 and not cleanExit
-sinceExit := cleanExit ? 0 : sinceExit + 1
-sinceTp := cleanTp ? 0 : sinceTp + 1
-
-// Hard "get out" marker: stop gone, without the extended-run filter.
-stopHit = lostStop and not cleanExit and barstate.isconfirmed
-
+// After the exit fires we are flat: stop painting TP / STOP on a dead run.
+stillLong = inRun and not exitAnnounced
 // =============================================================================
 // 9 . ENTRY GATE
 // =============================================================================
@@ -302,7 +340,7 @@ fill(pB2, pB3, color.new(color.red, 86), "Climax zone")
 plotshape(entryTrig, "ENTRY", shape.triangleup, location.belowbar, color.new(color.aqua, 0), size = size.small, text = "ENTRY", textcolor = color.aqua)
 plotshape(cleanTp, "TAKE PROFIT", shape.triangledown, location.abovebar, color.new(color.lime, 0), size = size.small, text = "TP", textcolor = color.lime)
 plotshape(cleanExit, "EXIT", shape.xcross, location.belowbar, color.new(color.red, 0), size = size.small, text = "EXIT", textcolor = color.red)
-plotshape(stopHit, "STOP", shape.labeldown, location.abovebar, color.new(color.maroon, 0), size = size.small, text = "STOP", textcolor = color.white)
+plotshape(cleanExit and stopBreached, "STOP", shape.labeldown, location.abovebar, color.new(color.maroon, 0), size = size.small, text = "STOP", textcolor = color.white)
 
 bgcolor(tradeable ? color.new(color.teal, 92) : na, title = "Tradeable")
 bgcolor(backside and inRun ? color.new(color.red, 88) : na, title = "Backside of HOD")
@@ -324,8 +362,9 @@ if barstate.islast and showPanel
     table.cell(panel, 1, 3, stopBreached ? "STOP HIT - EXIT" : (na(riskPct) ? "-" : str.tostring(riskPct, "#.##") + "%"), text_size = size.small, text_color = stopBreached ? color.red : color.white)
     table.cell(panel, 0, 4, "Mode", text_size = size.small)
     table.cell(panel, 1, 4, isClimax ? "CLIMAX (tight trail)" : "TREND (loose trail)", text_size = size.small)
-    table.cell(panel, 0, 5, "Stretch vs VWAP", text_size = size.small)
-    table.cell(panel, 1, 5, str.tostring(vwapStretch, "#.#") + "%", text_size = size.small)
+    nextTp = not tp1Done ? tp1Level : (not tp2Done ? tp2Level : (not tp3Done ? tp3Level : na))
+    table.cell(panel, 0, 5, "Next TP", text_size = size.small)
+    table.cell(panel, 1, 5, na(nextTp) ? "all taken" : str.tostring(nextTp, format.mintick), text_size = size.small, text_color = color.lime)
     table.cell(panel, 0, 6, "Structure", text_size = size.small)
     table.cell(panel, 1, 6, str.tostring(structPts, "#.#") + " / 15", text_size = size.small, text_color = structOk ? color.lime : color.red)
     table.cell(panel, 0, 7, "Chase", text_size = size.small)
