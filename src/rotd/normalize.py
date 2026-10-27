@@ -178,6 +178,35 @@ def normalize_float_shares(value: Optional[float]) -> Optional[float]:
     return f
 
 
+# Finviz reports Market Cap in the column's own units. When the header carries a
+# suffix ("895M") ``fnum`` multiplies correctly, but a bare ``895`` is the *same*
+# $895M with the unit dropped by the export. Downstream the universe ceiling and
+# G-PRICE both compare against MAX_MARKET_CAP in literal dollars, so a bare
+# millions value silently passes a $100M filter (VERIFIED: XNDU alerted with
+# "mcap 895 <= 100,000,000" on a ~$895M company). Any plausible cap in millions
+# is therefore rescaled here, at the ingestion boundary, exactly like the float.
+MARKET_CAP_MILLIONS_CEILING = 1_000_000.0     # $1M .. $1T expressed in millions
+MARKET_CAP_MILLIONS_SCALE = 1_000_000.0
+
+
+def normalize_market_cap(value: Optional[float]) -> Optional[float]:
+    """Return ``market_cap`` as literal USD.
+
+    A value below ``MARKET_CAP_MILLIONS_CEILING`` is treated as millions and
+    scaled by 1e6. ``None``, zero and negatives are returned unchanged so the
+    caller's own fail-closed checks still apply.
+    """
+    if value is None:
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if 0 < f < MARKET_CAP_MILLIONS_CEILING:
+        return f * MARKET_CAP_MILLIONS_SCALE
+    return f
+
+
 def _clock_ok(ts: Optional[datetime], now: datetime, tolerance_s: float = 120.0) -> bool:
     """DATA-09: a timestamp far in the future is a clock-skew artefact."""
     if ts is None:
@@ -433,7 +462,7 @@ def snapshot_from_finviz_rows(rows: list[dict[str, Any]], cfg: Config, mode: str
                                    "after_close": row.get("after_close"),
                                    "day_high": row.get("high"),
                                    "day_low": row.get("low"),
-                                   "market_cap": row.get("market_cap"),
+                                   "market_cap": normalize_market_cap(row.get("market_cap")),
                                })
         # POST: Finviz's plain Price is today's frozen 16:00 ET close and
         # After-Hours Close is the live extended print. Score after-hours

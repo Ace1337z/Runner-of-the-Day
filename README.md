@@ -730,6 +730,14 @@ purpose. Secrets (`secret=True`) are never displayed or logged.
 |---|---|---|---|
 | `MAX_PRICE` | `10.00` | USD | Legacy price ceiling, used only when `MAX_MARKET_CAP=0`. **No price floor.** |
 | `MAX_MARKET_CAP` | `100000000` | USD | Universe ceiling: market cap ≤ this, any share price (high-priced micro-caps qualify). `0` = disabled. |
+
+Finviz reports `Market Cap` in **millions** (e.g. a bare `895` meaning $895M) while
+this ceiling is in literal dollars. `normalize_market_cap()` rescales any value
+under `MARKET_CAP_MILLIONS_CEILING` by 1e6 at the ingestion boundary, the same way
+`normalize_float_shares()` already handles float. Without it a suffixed `895M`
+was converted correctly but a bare `895` passed the ceiling as **$895** — measured
+against the shipped fixture, that admitted 2,313 of 2,333 names (99.1%), so the
+market-cap scope was effectively disabled.
 | `INCLUDE_OTC` | `0` | bool | OTC off — poorer data, different rules. |
 | `INCLUDE_DERIVATIVES` | `0` | bool | Warrants/rights/units excluded. |
 | `PRICE_BANDS` | `0.20,0.50,1,5,10` | USD bounds | Tier boundaries for metric / MISS breakdowns. |

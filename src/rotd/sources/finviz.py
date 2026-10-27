@@ -22,6 +22,7 @@ from urllib.parse import urlencode
 
 from .base import (BaseClient, SourceError, fnum, finviz_avg_volume_shares,
                    looks_like_html, parse_csv)
+from ..normalize import normalize_market_cap
 from ..util import ET, now_utc
 
 log = logging.getLogger(__name__)
@@ -293,7 +294,7 @@ class FinvizClient(BaseClient):
             "company": row.get("Company") or "",
             "sector": row.get("Sector") or "",
             "industry": row.get("Industry") or "",
-            "market_cap": fnum(row.get("Market Cap")),
+            "market_cap": normalize_market_cap(fnum(row.get("Market Cap"))),
             "shares_out": fnum(row.get("Shares Outstanding")),
             "shares_float": fnum(row.get("Shares Float")),
             "short_float": fnum(row.get("Short Float")),
