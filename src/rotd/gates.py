@@ -72,6 +72,12 @@ R_RECENT_VOL_TOO_LOW = "RECENT_VOL_TOO_LOW"
 R_DVOL_10M_TOO_LOW = "DVOL_10M_TOO_LOW"
 R_BACKSIDE_OF_HOD = "BACKSIDE_OF_HOD"
 
+# Warmup fallback: the 10-minute window is ~3.33x the 3-minute one, but the
+# estimate uses 2.0 on purpose. A gapper must still out-trade a floor twice its
+# own 3-minute dollars, so the fallback cannot carry a marginal name over the
+# hurdle on a generous projection.
+DVOL_10M_WARMUP_SCALE = 2.0
+
 
 @dataclass
 class GateResult:
@@ -265,22 +271,38 @@ def gate_data(rec: Canonical, cfg: Config) -> GateResult:
 
 
 def live_volume_reason(vol_3m: Optional[float], dvol_10m: Optional[float],
-                       cfg: Config, mode: str) -> Optional[str]:
+                       cfg: Config, mode: str,
+                       price: Optional[float] = None) -> Optional[str]:
     """The hard live-volume reason code, or None when the tape is alive.
 
     Fail closed on warmup (``vol_3m is None``) and on dead tape. One helper is
     used by both the BOARD->ARMED and ARMED->IGNITION checks so the two can never
     disagree about what "alive" means.
+
+    ``price`` is only needed for the 10-minute warmup fallback. ``dvol_10m`` is
+    a rolling 10-minute delta, so on the first candles after the 4:00 AM open it
+    is ``None`` (deque too shallow) or ``0.0`` (no earlier sample to subtract).
+    Failing closed on that history gap blocked valid pre-market runners for the
+    full 10 minutes, so when the delta is unusable the dollar volume is
+    estimated from the already-vetted 3-minute tape instead. The session floor
+    still applies — this changes how the input is measured, never whether a
+    floor is enforced.
     """
     if vol_3m is None:
         return R_NO_VOL_HISTORY
     if vol_3m <= 0 or vol_3m < cfg.float("MIN_VOL_3M_SHARES", 15000):
         return R_RECENT_VOL_TOO_LOW
-    if dvol_10m is not None:
-        key = "MIN_DVOL_10M_EXT" if mode in ("PRE", "POST", "OVERNIGHT") else "MIN_DVOL_10M_REG"
-        floor = cfg.float(key, 15000 if key.endswith("EXT") else 40000)
-        if dvol_10m < floor:
-            return R_DVOL_10M_TOO_LOW
+    key = "MIN_DVOL_10M_EXT" if mode in ("PRE", "POST", "OVERNIGHT") else "MIN_DVOL_10M_REG"
+    floor = cfg.float(key, 15000 if key.endswith("EXT") else 40000)
+    # Warmup fallback for a 4:00 AM gapper (Candle-1). ``vol_3m`` is already
+    # vetted above, so an unusable 10m delta is estimated from the live
+    # 3-minute tape instead of failing closed on the history gap.
+    effective_dvol = dvol_10m
+    if (effective_dvol is None or effective_dvol <= 0) and price is not None:
+        if price > 0:
+            effective_dvol = vol_3m * price * DVOL_10M_WARMUP_SCALE
+    if effective_dvol is not None and effective_dvol < floor:
+        return R_DVOL_10M_TOO_LOW
     return None
 
 

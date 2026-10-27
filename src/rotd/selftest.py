@@ -95,6 +95,13 @@ def run(cfg: Config, verbose: bool = False) -> int:
                and live_volume_reason(1e6, 1e6, cfg, "OPEN") is None,
                "live-volume gate not fail-closed", results,
                "gates: live-volume gate fails closed")
+        # 4:00 AM warmup: an empty 10-minute history must be measured from the
+        # live 3-minute tape, not treated as dead tape (Candle-1 gappers).
+        _check(live_volume_reason(1e6, 0.0, cfg, "PRE", 0.75) is None
+               and live_volume_reason(1e6, None, cfg, "PRE", 0.75) is None
+               and live_volume_reason(1e6, 0.0, cfg, "PRE") == "DVOL_10M_TOO_LOW",
+               "10m warmup fallback wrong", results,
+               "gates: 10m warmup falls back to 3m tape")
         fh = json.loads(fixture_text("finnhub_quote.txt"))
         _check("c" in fh and "pc" in fh, "bad finnhub quote", results,
                "fixtures: finnhub quote shape")
@@ -151,13 +158,16 @@ def _reconcile_checks(cfg: Config, now, results, step) -> None:
     _check(choose_basis("PRE") == BASIS_EXTENDED and choose_basis("OPEN") == BASIS_REGULAR,
            "basis-by-mode wrong", results, "DATA-05 basis tagging")
 
-    # two agreeing sources -> OK, two far-apart -> CONFLICT
+    # two agreeing sources -> OK, two far-apart -> CONFLICT.
+    # PRICE_CONFLICT_PCT_EXT is 95% on purpose (the gap is bounded below 100%),
+    # so the probe must be a genuine order-of-magnitude disagreement: 2.00 vs
+    # 0.10 is 95%, 2.00 vs 0.05 is 97.5%.
     ok = reconcile_symbol("T", [PricePoint("finviz", 2.00, now, scope="SINGLE_VENUE"),
                                 PricePoint("finnhub", 2.01, now)], cfg, "PRE", now=now)
     _check(ok.price_reason == N.R_OK, "agreeing sources flagged", results,
            "DATA-02 agreement is OK")
     confl = reconcile_symbol("T", [PricePoint("finviz", 2.00, now, scope="SINGLE_VENUE"),
-                                   PricePoint("finnhub", 4.20, now)], cfg, "PRE", now=now)
+                                   PricePoint("finnhub", 0.05, now)], cfg, "PRE", now=now)
     _check(R_CONFLICT in confl.reasons, "far-apart sources not flagged", results,
            "DATA-02 conflict detected")
 

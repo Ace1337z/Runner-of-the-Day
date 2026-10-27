@@ -65,9 +65,12 @@ _GLOBAL: list[Setting] = [
             "Two sources >50% apart in regular hours => CONFLICT (DATA-02). Wide on purpose: "
             "micro-caps jump +20-30% in seconds and unverified helper feeds lag; a wide "
             "tolerance keeps vertical moves / feed lag from falsely flagging CONFLICT."),
-    Setting("PRICE_CONFLICT_PCT_EXT", "50.0", "%",
-            "Two sources >50% apart in extended hours => CONFLICT (DATA-02). Wide for the same "
-            "vertical-move / lag reasons as the regular-hours tolerance."),
+    Setting("PRICE_CONFLICT_PCT_EXT", "95.0", "%",
+            "Two sources more than this far apart in extended hours => CONFLICT (DATA-02). "
+            "The gap is measured RELATIVE to the higher price, so the value is bounded below "
+            "100%: anything >= 100 disables the gate entirely. 95% (vs 50% in regular hours) "
+            "absorbs a stale IEX quote on a pre-market gapper without ever accepting two "
+            "sources that disagree by an order of magnitude."),
     Setting("QUOTE_MAX_AGE_S_REG", "20", "s", "A regular-hours quote older than this is STALE (DATA-03)."),
     Setting("QUOTE_MAX_AGE_S_EXT", "60", "s", "An extended-hours quote older than this is STALE (DATA-03)."),
     Setting("BAR_MAX_AGE_S", "90", "s", "A bar series whose last bar is older than this is STALE (DATA-03)."),
@@ -99,9 +102,11 @@ _GLOBAL: list[Setting] = [
             "MIDDAY only: the TAPE component must reach this raw score to ignite, so a "
             "slow 2-hour stair-step grind cannot ride maxed FUEL/STRUCTURE/CONTEXT to an "
             "alert. 0 disables the extra midday floor."),
-    Setting("MIN_STRUCTURE_SCORE", "4.0", "points",
+    Setting("MIN_STRUCTURE_SCORE", "2.0", "points",
             "Minimum weighted STRUCTURE points (of 15) required to reach ARMED. "
-            "Rejects high-volume/fuel setups with terrible front-side structure."),
+            "Rejects high-volume/fuel setups with terrible front-side structure. "
+            "2.0 (not 4.0) accommodates beaten-down penny setups whose 52w-low / gap "
+            "sub-scores are structurally weak but whose tape is genuinely igniting."),
 
     # --- gates (section 7) ---
     Setting("EXT_SPREAD_MULT", "1.5", "x", "POST/PRE spreads are looser by 1.5x (G-SPREAD)."),
@@ -147,8 +152,8 @@ _GLOBAL: list[Setting] = [
     Setting("BOARD_MIN_DWELL_S", "15", "s", "Must stay top-5 this long to hold BOARD (hysteresis)."),
     Setting("BOARD_EXIT_RANK", "8", "rank", "Leaves BOARD only below this rank (hysteresis)."),
     Setting("ARM_MAX_RANK", "3", "rank", "ARMED requires rank <= this."),
-    Setting("ARM_MIN_SCORE", "78", "points", "ARMED requires score >= this, re-checked every cycle while ARMED."),
-    Setting("IGNITION_THRESHOLD", "78", "points", "ARMED keeps its confirmation only while score >= this; the last gate before IGNITION (the alert trigger)."),
+    Setting("ARM_MIN_SCORE", "70", "points", "ARMED requires score >= this, re-checked every cycle while ARMED."),
+    Setting("IGNITION_THRESHOLD", "70", "points", "ARMED keeps its confirmation only while score >= this; the last gate before IGNITION (the alert trigger). Must stay >= ARM_MIN_SCORE, or a name could arm at one score and fire on a weaker one."),
     Setting("CHASE_CAP_PCT", "18.0", "%", "No ignition if price is >this% above the armed level."),
     Setting("EXT_CONFIRM_BARS", "1", "bars", "POST/PRE need this many confirming extended bars."),
     Setting("REG_CONFIRM_BARS", "1", "bars", "Regular hours need this many confirming bars."),
@@ -199,7 +204,7 @@ _GLOBAL: list[Setting] = [
     Setting("TRADINGVIEW_ENABLED", "1", "bool", "Use the keyless TradingView scanner for batch freshness quotes; falls back to Alpaca/Finnhub when off/unavailable."),
     Setting("TRADINGVIEW_TIMEOUT_S", "10", "s", "HTTP timeout for one batch scanner POST."),
     Setting("TRADINGVIEW_CACHE_TTL_S", "10", "s", "Reuse one batch scanner result for this window (at most one POST per cycle)."),
-    Setting("TRADINGVIEW_MAX_DEVIATION_PCT", "20", "%", "Drop a scanner price that deviates from the reconciled Finviz price by more than this (unverified feed stays out of the decision path)."),
+    Setting("TRADINGVIEW_MAX_DEVIATION_PCT", "150", "%", "Drop a scanner price that deviates from the reconciled Finviz price by more than this (unverified feed stays out of the decision path). 150% matches the expanded pre-market volatility tolerance, so a fast gapper is not discarded as 'deviant' mid-spike."),
 
     # --- discovery (section 6) ---
     Setting("CARRY_LOOKBACK_D", "90", "days", "Carry-list 'recent runner history' window (§6.4)."),

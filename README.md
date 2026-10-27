@@ -276,10 +276,21 @@ Whole-day volume is not evidence that a stock is moving *now*. A name that ran a
 | 10-minute dollar volume, OPEN/MIDDAY | `MIN_DVOL_10M_REG` | $75,000 | `DVOL_10M_TOO_LOW` |
 | 10-minute dollar volume, PRE/POST | `MIN_DVOL_10M_EXT` | $25,000 | `DVOL_10M_TOO_LOW` |
 | No rolling history yet (warmup) | — | — | `NO_VOL_HISTORY` |
+| 10m roll unusable at 4:00 AM | falls back to 3-minute tape ×2, floor still applies | — | — |
 
 The check **fails closed**: warmup (no history) is a failure, not a pass, so the
 first cycles after a restart cannot arm a name on unknown tape. Warm boot
 (see below) is what keeps that window short.
+
+The one exception is the **10-minute dollar volume at the 4:00 AM open**. The
+10-minute figure is a rolling delta, so on the first candles it is `None` (the
+deque is too shallow) or `0.0` (no earlier sample to subtract). Failing closed
+on that gap stalled valid pre-market gappers for the full 10 minutes, so when
+the delta is unusable the dollar volume is estimated from the already-vetted
+3-minute tape at a conservative ×2 (the truthful ratio is ~3.33×). A name must
+still out-trade a floor twice its own 3-minute dollars, and the session floor
+still applies: the fallback changes how the input is measured, never whether a
+floor is enforced.
 
 ### Warm boot
 
@@ -310,7 +321,7 @@ ROTD buys strength, not fades. Two mechanisms enforce that:
   15% below the day high blocks `ARMED → IGNITION` (`BACKSIDE_OF_HOD`) and
   proportionally penalizes the STRUCTURE component (a drawdown at/above the
   threshold scores ZERO), so a +80%-then-−35% chart cannot rank on old strength.
-- **Minimum structure score** (`MIN_STRUCTURE_SCORE`, 4.0/15) — a heavy-tape name
+- **Minimum structure score** (`MIN_STRUCTURE_SCORE`, 2.0/15) — a heavy-tape name
   with a weak front-side chart cannot reach ARMED (`ARM_STRUCTURE_TOO_LOW`), and it
   steps back out mid-confirmation if its chart rolls over
   (`ARM_STEP_DOWN_STRUCTURE`), so volume/fuel can never carry a dying double-top
@@ -709,7 +720,7 @@ purpose. Secrets (`secret=True`) are never displayed or logged.
 | Setting | Default | Unit | Meaning |
 |---|---|---|---|
 | `PRICE_CONFLICT_PCT_REG` | `50.0` | % | Two sources >50% apart in regular hours ⇒ CONFLICT. Wide on purpose: micro-caps jump +20-30% in seconds and helper feeds lag. |
-| `PRICE_CONFLICT_PCT_EXT` | `50.0` | % | Same in extended hours. |
+| `PRICE_CONFLICT_PCT_EXT` | `95.0` | % | Extended hours: same check, wider tolerance. Measured relative to the higher price, so it is bounded below 100% — a value ≥ 100 disables the gate. |
 | `QUOTE_MAX_AGE_S_REG` | `20` | s | A regular-hours quote older than this is STALE. |
 | `QUOTE_MAX_AGE_S_EXT` | `60` | s | An extended-hours quote older than this is STALE. |
 | `BAR_MAX_AGE_S` | `90` | s | A bar series whose last bar is older than this is STALE. |
@@ -724,7 +735,7 @@ purpose. Secrets (`secret=True`) are never displayed or logged.
 | `MIN_DVOL_10M_REG` | `150000` | USD | Minimum 10-minute rolling dollar volume in OPEN/MIDDAY. |
 | `MIN_DVOL_10M_EXT` | `75000` | USD | Minimum 10-minute rolling dollar volume in PRE/POST. |
 | `MAX_DRAWDOWN_FROM_HOD_PCT` | `15.0` | % | Block ARMED→IGNITION when price is more than this below the day high; a drawdown at/over this zeroes the structure sub-score. |
-| `MIN_STRUCTURE_SCORE` | `4.0` | points | Minimum weighted STRUCTURE points (of 15) required to reach (and hold) ARMED. |
+| `MIN_STRUCTURE_SCORE` | `2.0` | points | Minimum weighted STRUCTURE points (of 15) required to reach (and hold) ARMED. |
 
 ### Gates (fail-closed; run before scoring)
 | Gate | Enforced? | Needs | Default setting |
@@ -781,8 +792,8 @@ silently cap the score.
 | `BOARD_MIN_DWELL_S` | `15` | s | Must stay top-5 this long to hold BOARD. |
 | `BOARD_EXIT_RANK` | `8` | rank | Leaves BOARD only below this rank. |
 | `ARM_MAX_RANK` | `3` | rank | ARMED requires rank ≤ this. |
-| `ARM_MIN_SCORE` | `78` | points | ARMED requires score ≥ this. |
-| `IGNITION_THRESHOLD` | `78` | points | ARMED keeps its confirmation only while score ≥ this (last gate before IGNITION — the alert trigger). Matches `ARM_MIN_SCORE` so a name cannot arm at 78 and fire at 70. |
+| `ARM_MIN_SCORE` | `70` | points | ARMED requires score ≥ this. |
+| `IGNITION_THRESHOLD` | `70` | points | ARMED keeps its confirmation only while score ≥ this (last gate before IGNITION — the alert trigger). Must stay ≥ `ARM_MIN_SCORE` so a name cannot arm at one score and fire on a weaker one. |
 | `CHASE_CAP_PCT` | `18.0` | % | No ignition if price is >this% above the armed level. |
 | `VWAP_IGNITION_TOLERANCE_PCT` | `0.5` | % | Ignition tolerates a wick this far **below** VWAP (a retest of VWAP support) instead of aborting on a strict `price < vwap` test. |
 | `MIDDAY_MIN_TAPE_RAW` | `0.72` | 0..1 | MIDDAY only: the TAPE component must reach this raw score to ignite, so a slow 2-hour stair-step grind cannot ride maxed FUEL/STRUCTURE/CONTEXT to an alert. `0` disables it. |
@@ -913,7 +924,7 @@ only gains `auto_vacuum` after a full `VACUUM` or a fresh file — see
 | `TRADINGVIEW_ENABLED` | `1` | bool | Keyless batch freshness scanner; falls back to Alpaca/Finnhub when off. |
 | `TRADINGVIEW_TIMEOUT_S` | `10` | s | HTTP timeout for one batch scanner POST. |
 | `TRADINGVIEW_CACHE_TTL_S` | `10` | s | Reuse one batch result for this window (at most one POST per cycle). |
-| `TRADINGVIEW_MAX_DEVIATION_PCT` | `20` | % | Drop a scanner price this far off the reconciled Finviz price. |
+| `TRADINGVIEW_MAX_DEVIATION_PCT` | `150` | % | Drop a scanner price this far off the reconciled Finviz price. |
 
 ### Per-mode profile (cadence & ignition policy)
 | Mode | `POLL_S` | `ALLOW_IGNITION` |
@@ -962,7 +973,7 @@ stops at the first source that answers:
 
 1. **TradingView scanner** — one keyless POST returns price/volume for the whole
    pool. Regular session only (`OPEN`/`MIDDAY`); extended-hours truth stays with
-   Finviz. A scanner price more than `TRADINGVIEW_MAX_DEVIATION_PCT` (20%) off the
+   Finviz. A scanner price more than `TRADINGVIEW_MAX_DEVIATION_PCT` (150%) off the
    reconciled Finviz price is dropped, so an unverified feed cannot enter the
    decision path on its own.
 2. **Alpaca batched quotes** — one `latest_quotes` call covers up to 40 symbols

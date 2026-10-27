@@ -227,7 +227,10 @@ class StateMachine:
 
         def _vol_reason(sym: str) -> Optional[str]:
             v3, dv10 = _live(sym)
-            return live_volume_reason(v3, dv10, self.cfg, mode)
+            px = prices.get(sym)
+            if px is None:
+                px = getattr(records.get(sym), "price", None)
+            return live_volume_reason(v3, dv10, self.cfg, mode, px)
         out: list[Transition] = []
 
         board_syms = {s.symbol for s in ranking.board}

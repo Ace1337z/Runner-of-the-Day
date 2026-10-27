@@ -303,28 +303,39 @@ def test_midday_floor_disabled_by_zero(tmp_path: Path):
 # --- score gates -----------------------------------------------------------
 
 def test_production_score_gates_match(tmp_path: Path):
-    """A name must not arm at 78 and then fire at 70.
+    """IGNITION_THRESHOLD must never fall below ARM_MIN_SCORE.
 
-    IGNITION_THRESHOLD is the last gate before the alert, so it must be at least
-    ARM_MIN_SCORE: otherwise a candidate qualifies at one score and ignites on a
-    weaker one, which is exactly the "armed on stale strength" failure the
-    fail-closed ARMED logic exists to prevent.
+    IGNITION_THRESHOLD is the last gate before the alert, so a candidate must
+    not qualify for ARMED at one score and then ignite on a weaker one — that is
+    exactly the "armed on stale strength" failure the fail-closed ARMED logic
+    exists to prevent.
     """
     cfg = Config(path=tmp_path / "c.env")
     arm = cfg.float("ARM_MIN_SCORE")
     ignite = cfg.float("IGNITION_THRESHOLD")
-    assert arm == 78
-    assert ignite == 78
+    assert arm == 70
+    assert ignite == 70
     assert ignite >= arm, f"ignition {ignite} < arm {arm}"
 
 
 def test_arming_then_firing_at_a_lower_score_is_blocked(tmp_path: Path):
-    """Drive a name to ARMED, drop its score below 78, and confirm it cannot ignite."""
+    """Drive a name to ARMED, drop its score below ARM_MIN_SCORE, confirm no ignition.
+
+    The candidate here scores ~53 with FUEL and CONTEXT de-weighted, so it can
+    register as a candidate but cannot clear either production score gate.
+    """
     cfg = Config(path=tmp_path / "c.env")
+    # Read the production floors before _park_armed zeroes them to reach ARMED.
+    floor = cfg.float("ARM_MIN_SCORE")
+    ignite = cfg.float("IGNITION_THRESHOLD")
+    cfg._values["W_FUEL"] = "0"        # shed ~30 raw points; the tape is intact
+    cfg._values["W_CONTEXT"] = "0"
     rec = _rec(price=2.10, prev_close=2.00)
     sm, rk, snap, prices = _park_armed(cfg, rec)
-    # Restore the real thresholds now that the name is parked ARMED.
-    sm.cfg._values["IGNITION_THRESHOLD"] = "78"
-    sm.cfg._values["ARM_MIN_SCORE"] = "78"
-    out = _ignite_attempts(sm, rk, snap, prices, vwap=1.95)
+    # Restore the real thresholds now that the name is parked ARMED: at this
+    # score it must not ignite, and must not stay armed either.
+    sm.cfg._values["IGNITION_THRESHOLD"] = str(ignite)
+    sm.cfg._values["ARM_MIN_SCORE"] = str(floor)
+    out = _ignite_attempts(sm, rk, snap, prices, vwap=1.95, n=2)
     assert sm.states["RIME"].state != State.IGNITION, [t.reason for t in out]
+    assert any(t.reason == "ARM_STEP_DOWN_SCORE" for t in out), [t.reason for t in out]

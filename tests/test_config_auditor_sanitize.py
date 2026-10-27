@@ -18,16 +18,17 @@ T0_S = datetime(2026, 10, 21, 14, 0, tzinfo=UTC)
 
 
 def test_ignition_threshold_and_ai_timeout_have_defaults(cfg: Config):
-    assert cfg.int("IGNITION_THRESHOLD", 70) == 78
+    assert cfg.int("IGNITION_THRESHOLD", 70) == 70
     assert cfg.float("AI_TIMEOUT_S", 30) == 12.0
-    assert cfg.float("ARM_MIN_SCORE", 68) == 78.0
+    assert cfg.float("ARM_MIN_SCORE", 68) == 70.0
     assert cfg.float("CHASE_CAP_PCT", 25.0) == 18.0
 
 
 def test_structure_gate_defaults(cfg: Config):
-    # Front-side protection defaults: 4.0/15 structure floor and a 15% HOD
-    # drawdown threshold (the sub-score is zeroed at/over it).
-    assert cfg.float("MIN_STRUCTURE_SCORE", 4.0) == 4.0
+    # Front-side protection defaults: the 2.0/15 structure floor (lowered from
+    # 4.0 so beaten-down penny setups with strong tape can still arm) and a 15%
+    # HOD drawdown threshold (the sub-score is zeroed at/over it).
+    assert cfg.float("MIN_STRUCTURE_SCORE", 4.0) == 2.0
     assert cfg.float("MAX_DRAWDOWN_FROM_HOD_PCT", 15.0) == 15.0
 
 
