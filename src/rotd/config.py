@@ -76,6 +76,13 @@ _GLOBAL: list[Setting] = [
     Setting("BAR_MAX_AGE_S", "90", "s", "A bar series whose last bar is older than this is STALE (DATA-03)."),
     Setting("FLOAT_CONFLICT_FACTOR", "1.5", "x",
             "Two float sources >1.5x apart => FLOAT_CONFLICT (DATA-06)."),
+    Setting("FLOAT_MIN_OUTSTANDING_RATIO", "0.5", "x",
+            "Market cap / price gives shares outstanding, which can never be smaller than "
+            "the float. A float below this fraction of the implied count is a units error "
+            "(DATA-06b) and the float is dropped, not guessed. 0 disables the check."),
+    Setting("FLOAT_MAX_OUTSTANDING_RATIO", "20.0", "x",
+            "A float more than this many times below the implied outstanding count is a "
+            "units error (DATA-06b); again the float is dropped rather than rescaled."),
     Setting("SEC_SHARES_MAX_AGE_D", "14", "days",
             "A share count from an SEC filing older than this cannot bound float (DATA-06)."),
     Setting("REVERSE_SPLIT_RECENT_D", "90", "days",

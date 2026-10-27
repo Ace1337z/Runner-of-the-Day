@@ -214,6 +214,25 @@ def _clock_ok(ts: Optional[datetime], now: datetime, tolerance_s: float = 120.0)
     return as_utc(ts).timestamp() <= now.timestamp() + tolerance_s
 
 
+def _implied_shares_outstanding(rec: "Canonical",
+                                meta: Optional[dict[str, Any]]) -> Optional[float]:
+    """Shares outstanding implied by market cap / price, or None.
+
+    Market cap is normalised to literal dollars at ingestion, so this is a
+    trustworthy anchor: outstanding = cap / price. Outstanding can never be
+    smaller than the float, and a float far below it is a units error.
+    """
+    cap = rec.market_cap or (meta or {}).get("market_cap")
+    px = rec.price
+    if not cap or not px or px <= 0:
+        return None
+    try:
+        out = float(cap) / float(px)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    return out if out > 0 else None
+
+
 def choose_basis(mode: str) -> str:
     """DATA-05/DATA-01: which basis a fetch in ``mode`` produces."""
     if mode in ("OPEN", "MIDDAY"):
@@ -323,6 +342,46 @@ def reconcile_symbol(symbol: str, points: Iterable[PricePoint], cfg: Config,
             # share count. Prefer the larger value: more conservative dilution.
             rec.shares_float = hi
             rec.float_reason = R_OK
+            # DATA-06b: a float must be arithmetically consistent with the
+            # market cap. The multi-source check above can never fire when only
+            # one feed supplies a float (lo == hi), which is the normal case.
+            # A float that implies an outstanding count wildly below, or a
+            # short interest above, the share count is a units error, not a
+            # micro-cap fact. Observed 2026-10-27: XNDU reported float 5.15M
+            # against a ~$895M cap at $2.98 (300M shares out) plus 155% short
+            # float -- 1.55x the entire float short, which cannot happen.
+            implied_out = _implied_shares_outstanding(rec, meta)
+            if implied_out and rec.shares_float and rec.shares_float > implied_out * 20:
+                # A float CANNOT exceed shares outstanding. When the millions
+                # guess overshoots (raw 5150 = thousands -> 5.15e9 shares), the
+                # value is contradicted by market cap alone; try thousands.
+                alt = rec.shares_float / 1_000.0
+                if alt <= implied_out:
+                    log.warning("%s: float %s exceeds outstanding %s; "
+                                "re-reading as thousands (%s)",
+                                rec.symbol, f"{rec.shares_float:,.0f}",
+                                f"{implied_out:,.0f}", f"{alt:,.0f}")
+                    rec.shares_float = alt
+            if implied_out and rec.shares_float:
+                ratio = implied_out / rec.shares_float
+                lo_ratio = cfg.float("FLOAT_MIN_OUTSTANDING_RATIO", 0.5)
+                hi_ratio = cfg.float("FLOAT_MAX_OUTSTANDING_RATIO", 100.0)
+                if lo_ratio > 0 and ratio > hi_ratio:
+                    rec.note(R_FLOAT_CONFLICT)
+                    rec.float_reason = R_FLOAT_CONFLICT
+                    log.warning("%s: float %s is %.0fx below the %s shares implied "
+                                "by market cap -> FLOAT_CONFLICT",
+                                rec.symbol, f"{rec.shares_float:,.0f}", ratio,
+                                f"{implied_out:,.0f}")
+                    rec.shares_float = None
+                elif lo_ratio > 0 and ratio < lo_ratio:
+                    rec.note(R_FLOAT_CONFLICT)
+                    rec.float_reason = R_FLOAT_CONFLICT
+                    log.warning("%s: float %s exceeds the %s shares implied by "
+                                "market cap -> FLOAT_CONFLICT",
+                                rec.symbol, f"{rec.shares_float:,.0f}",
+                                f"{implied_out:,.0f}")
+                    rec.shares_float = None
 
     if meta:
         for key in ("sector", "industry", "company", "short_float", "avg_volume",

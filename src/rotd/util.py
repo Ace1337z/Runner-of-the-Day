@@ -117,6 +117,17 @@ def next_session(after: Optional[date] = None) -> date:
     return cal.date_to_session(d.isoformat(), direction="next").date()
 
 
+def following_session(after: date) -> date:
+    """The first trading session STRICTLY after ``after``.
+
+    ``next_session`` is inclusive: given a session it returns that same date,
+    which is right for "which session contains this moment" but useless for
+    stepping forward. The POST->next-day mapping needs the successor, so a
+    Friday post-market starts Monday rather than staying on Friday.
+    """
+    return _calendar().next_session(after.isoformat()).date()
+
+
 def is_half_day(d: Optional[date] = None) -> bool:
     """True when the session is a half day (early close)."""
     d = d or now_et().date()
@@ -169,18 +180,26 @@ def mode_for(dt: Optional[datetime] = None) -> str:
 def trading_day_for(dt: Optional[datetime] = None) -> date:
     """The ROTD trading day a moment belongs to.
 
-    A1: the day runs from the start of POST (16:00 ET) to the end of MIDDAY
-    (16:00 ET) of the next session, so a post-market runner and its pre-market
-    continuation are one name. Before 16:00 ET we are on *today's* day; at/after
-    16:00 ET we are on the *next* session's day label.
+    A1: the day runs from the start of POST (16:00 ET) THROUGH the overnight and
+    pre-market, to the end of the next session's MIDDAY (16:00 ET). POST belongs
+    to the *coming* session, not the one that just closed: a post-market runner,
+    its pre-market continuation and the next open are one name on one day, and
+    nothing in that arc may roll the day label -- a rollover wipes the rolling
+    volume history and strands exactly the names this system exists to catch.
+
+    Before 16:00 ET we are still on today's day; at/after 16:00 ET the POST we
+    are in starts the *next* session's day.
     """
     dt = dt or now_utc()
     et = to_et(dt)
     d = et.date()
     if is_trading_day(d) and et.time() < dtime(16, 0):
         return d
-    # Roll to the next session whose POST we are in (or about to be).
-    return next_session(d)
+    # 16:00 ET onwards: POST/OVERNIGHT/PRE/OPEN/MIDDAY all belong to this next
+    # session's day. ``following_session`` steps STRICTLY forward (``next_session``
+    # is inclusive and would hand back the same date), so a Friday POST starts
+    # Monday's day and Monday POST starts Tuesday's.
+    return following_session(d)
 
 
 # --- formatting ------------------------------------------------------------

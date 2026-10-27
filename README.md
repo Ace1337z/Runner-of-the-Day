@@ -310,15 +310,17 @@ price it has not re-confirmed.
 
 ### POST → PRE carry-over
 
-The trading-day label rolls at 16:00 ET, which sits in the middle of the
-POST → OVERNIGHT → PRE arc of the *same* name. Without help, `_ensure_day` would
+**The trading day starts at POST (16:00 ET)** and runs through OVERNIGHT → PRE →
+OPEN → MIDDAY with no rollover anywhere inside that arc. POST belongs to the
+*coming* session: Monday 16:01 ET is already Tuesday's day. Nothing in the arc
+can wipe the rolling history, which is what used to strand 4:00 AM gappers. Without help, `_ensure_day` would
 wipe the rolling volume history at that boundary and pre-market would start
 blind — `vol_3m` needs 3 minutes of samples, `dvol_10m` needs 10 — so a name
 that ran in POST and gapped at 4:00 AM stalled on the volume gate.
 
 `runtime._carry_prior_session` seeds the deque from the last
-`PRIOR_SESSION_CARRY_MIN` (240 = the whole POST window) of the prior session's
-POST/OVERNIGHT snapshots. The window is anchored to the **end of POST**, not to
+`PRIOR_SESSION_CARRY_MIN` (240) of the session that just closed, anchored to its
+16:00 ET close. The window is anchored to the **end of POST**, not to
 "now", because a window measured back from 4:00 AM could never reach a session
 that closed at 20:00 ET the evening before.
 
@@ -753,6 +755,8 @@ market-cap scope was effectively disabled.
 | `QUOTE_MAX_AGE_S_EXT` | `60` | s | An extended-hours quote older than this is STALE. |
 | `BAR_MAX_AGE_S` | `90` | s | A bar series whose last bar is older than this is STALE. |
 | `FLOAT_CONFLICT_FACTOR` | `1.5` | x | Two float sources >1.5× apart ⇒ FLOAT_CONFLICT. |
+| `FLOAT_MIN_OUTSTANDING_RATIO` | `0.5` | x | Market cap ÷ price gives shares outstanding, which can never be smaller than the float. A float below this fraction of the implied count is a units error: the float is **dropped**, never rescaled. 0 disables. |
+| `FLOAT_MAX_OUTSTANDING_RATIO` | `20.0` | x | A float more than this far below the implied outstanding count is a units error; the float is dropped. Calibrated against the shipped universe (median ratio 1.28×, p99 18.8×). |
 | `SEC_SHARES_MAX_AGE_D` | `14` | days | Shares older than this can't bound float. |
 | `REVERSE_SPLIT_RECENT_D` | `90` | days | A recent reverse split flags REVERSE_SPLIT_RECENT. |
 
@@ -919,7 +923,7 @@ rules-only deployment prints `~ catalyst: no model configured`.
 | `CAND_JSON_TOP_N` | `50` | rank | Keep full gate/feature JSON only for this many top names; other rows store compact reasons. |
 | `MEMORY_TTL_S` | `7200` | s | Evict per-symbol in-memory dictionaries after this long out of the active universe. |
 | `VOL_HISTORY_RESTORE_MIN` | `15` | minutes | On restart, rehydrate the rolling volume history from this recent window. |
-| `PRIOR_SESSION_CARRY_MIN` | `240` | minutes | At the 16:00 ET rollover, seed the rolling volume history from this much of the prior POST/OVERNIGHT tape (anchored to the end of POST). Pre-market starts warm instead of waiting 3-10 minutes for the deque. 0 disables. |
+| `PRIOR_SESSION_CARRY_MIN` | `240` | minutes | POST starts the new trading day, so this seeds the rolling volume history at the 16:00 ET boundary from the closing session's tape (anchored to its close). Pre-market starts warm instead of waiting 3-10 minutes. 0 disables. |
 | `DISK_WARN_PCT` | `10` | % | Warn once when free disk falls under this. |
 | `QUIET_HOURS` | (empty) | HH:MM-HH:MM,mode | Optional per-mode quiet hours (none by default). |
 

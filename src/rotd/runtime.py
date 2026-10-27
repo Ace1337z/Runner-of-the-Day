@@ -178,20 +178,23 @@ class Runtime:
 
     def _carry_prior_session(self, prev_day: date, day: date,
                              ts: datetime) -> None:
-        """Seed the rolling volume history from the session that just ended.
+        """Seed the rolling volume history from the session that just closed.
 
-        The trading-day label rolls at 16:00 ET (design A1), and ``_ensure_day``
-        wipes the in-memory rolling history when it does. That boundary sits in
-        the middle of the POST -> OVERNIGHT -> PRE arc of the *same* name, so a
-        post-market runner that is gapping at 4:00 AM would otherwise start the
-        pre-market blind: ``vol_3m`` needs 3 minutes of samples and
-        ``dvol_10m`` needs 10, which is exactly the late trigger this removes.
+        POST starts the *new* trading day (see ``trading_day_for``), so the
+        POST -> OVERNIGHT -> PRE -> OPEN -> MIDDAY arc no longer contains a
+        rollover and its history is never wiped mid-arc. The only wipe happens
+        here, at the POST boundary, and this seeds what it drops: the closing
+        session's tape, so a name that ran into the bell arrives in pre-market
+        already warm instead of waiting 3-10 minutes for the deque to refill.
 
-        Cumulative volume restarts at the session boundary, so the carried
-        samples are **rebased**: the newest prior sample is the baseline and the
-        deltas are measured only across queued pre-market samples. Carrying a
-        raw cumulative series would make a reset-to-zero counter look like a
-        huge negative delta, and a fresh counter look like a spike.
+        The window is anchored to the CLOSE of ``prev_day`` (16:00 ET) and looks
+        backwards, covering that session's MIDDAY. It cannot be anchored to
+        ``ts``: at 4:00 AM pre-market the gap back to the previous close is
+        hours long, so a window measured from "now" would never reach it.
+
+        Cumulative volume restarts at the boundary, so the carried samples are
+        **rebased** (see ``_update_vol_history``): a counter that drops clears
+        the deque rather than producing a bogus delta.
 
         Fail soft: a corrupt or absent history must never block a cycle.
         """
@@ -200,32 +203,26 @@ class Runtime:
         win = self.cfg.int("PRIOR_SESSION_CARRY_MIN", 240)
         if win <= 0:
             return
-        # Anchor the window to the END of the prior session, not to ``ts``: the
-        # overnight gap is hours long, so a window measured back from 4:00 AM
-        # can never reach a POST that closed at 20:00 ET the evening before.
-        # POST runs 16:00-20:00 ET, so the prior session ends 4h after its close.
         try:
             close = session_close_utc(prev_day)
         except Exception:  # noqa: BLE001 - a bad calendar must not block a cycle
             close = None
         if close is None:
             return
-        end = close + timedelta(hours=4)
-        cutoff = (end - timedelta(minutes=win)).isoformat()
+        cutoff = (close - timedelta(minutes=win)).isoformat()
         try:
             rows = self.store.query(
                 "SELECT cycle_ts, quality_json, mode FROM snapshots "
                 "WHERE trading_day=? AND cycle_ts>=? AND cycle_ts<=? "
                 "ORDER BY cycle_ts",
-                (prev_day.isoformat(), cutoff, end.isoformat()))
+                (prev_day.isoformat(), cutoff, close.isoformat()))
         except Exception as exc:  # noqa: BLE001 - never block a cycle
             log.warning("prior-session carry: history unavailable: %s", exc)
             return
         carried = 0
         for row in rows:
-            # Only the extended-hours portion is contiguous with pre-market.
-            if str(row["mode"]) not in ("POST", "OVERNIGHT"):
-                continue
+            # Regular and extended hours of the closing session are both
+            # eligible: the name was trading, and that is what continuity means.
             try:
                 q = json.loads(row["quality_json"] or "{}")
             except ValueError:
@@ -240,8 +237,6 @@ class Runtime:
                 if vol is None:
                     continue
                 dq = self._vol_history.setdefault(sym, deque(maxlen=60))
-                # Rebase: a pre-market counter that restarts below the last
-                # post-market reading would otherwise register as a spike.
                 if dq and float(vol) < dq[-1][1]:
                     dq.clear()
                 dq.append((as_utc(sample_ts), float(vol), prices.get(sym)))
