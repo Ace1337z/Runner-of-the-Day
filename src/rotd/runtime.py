@@ -39,7 +39,7 @@ from .state_machine import StateMachine, State, Transition
 from .store import Store
 from .sources.base import SourceError
 from .tracker import PathTracker, Runner, build_runner_list
-from .util import as_utc, fmt_ts, now_utc, sha256_hex
+from .util import as_utc, fmt_ts, now_utc, session_close_utc, sha256_hex
 
 log = logging.getLogger(__name__)
 
@@ -100,8 +100,9 @@ class Runtime:
         self._data_grades: list[str] = []
         self._fresh_cursor = 0  # rotates the Finnhub freshness quote across the pool
 
-    def _ensure_day(self, day: date) -> None:
+    def _ensure_day(self, day: date, now: Optional[datetime] = None) -> None:
         if self._day != day:
+            prev_day = self._day
             self._day = day
             self.sm = StateMachine(self.cfg, day)
             self._history.clear()
@@ -112,6 +113,12 @@ class Runtime:
             self._last_touch.clear()
             self._data_grades = []
             self._warm_boot(day)
+            # POST -> PRE continuity (design A1). The trading-day label rolls at
+            # 16:00 ET, so POST's tape is wiped the moment pre-market begins and
+            # a 4:00 AM gapper looks cold until the rolling deque refills. Seed
+            # it from the prior session so PRE starts warm.
+            if prev_day is not None:
+                self._carry_prior_session(prev_day, day, now or now_utc())
 
     # -- warm boot (item 7) -------------------------------------------------
     def _warm_boot(self, day: date) -> None:
@@ -168,6 +175,80 @@ class Runtime:
             self._restore_budget(day)
         except Exception as exc:  # noqa: BLE001
             log.warning("warm boot: state restore failed: %s", exc)
+
+    def _carry_prior_session(self, prev_day: date, day: date,
+                             ts: datetime) -> None:
+        """Seed the rolling volume history from the session that just ended.
+
+        The trading-day label rolls at 16:00 ET (design A1), and ``_ensure_day``
+        wipes the in-memory rolling history when it does. That boundary sits in
+        the middle of the POST -> OVERNIGHT -> PRE arc of the *same* name, so a
+        post-market runner that is gapping at 4:00 AM would otherwise start the
+        pre-market blind: ``vol_3m`` needs 3 minutes of samples and
+        ``dvol_10m`` needs 10, which is exactly the late trigger this removes.
+
+        Cumulative volume restarts at the session boundary, so the carried
+        samples are **rebased**: the newest prior sample is the baseline and the
+        deltas are measured only across queued pre-market samples. Carrying a
+        raw cumulative series would make a reset-to-zero counter look like a
+        huge negative delta, and a fresh counter look like a spike.
+
+        Fail soft: a corrupt or absent history must never block a cycle.
+        """
+        if self.store is None:
+            return
+        win = self.cfg.int("PRIOR_SESSION_CARRY_MIN", 240)
+        if win <= 0:
+            return
+        # Anchor the window to the END of the prior session, not to ``ts``: the
+        # overnight gap is hours long, so a window measured back from 4:00 AM
+        # can never reach a POST that closed at 20:00 ET the evening before.
+        # POST runs 16:00-20:00 ET, so the prior session ends 4h after its close.
+        try:
+            close = session_close_utc(prev_day)
+        except Exception:  # noqa: BLE001 - a bad calendar must not block a cycle
+            close = None
+        if close is None:
+            return
+        end = close + timedelta(hours=4)
+        cutoff = (end - timedelta(minutes=win)).isoformat()
+        try:
+            rows = self.store.query(
+                "SELECT cycle_ts, quality_json, mode FROM snapshots "
+                "WHERE trading_day=? AND cycle_ts>=? AND cycle_ts<=? "
+                "ORDER BY cycle_ts",
+                (prev_day.isoformat(), cutoff, end.isoformat()))
+        except Exception as exc:  # noqa: BLE001 - never block a cycle
+            log.warning("prior-session carry: history unavailable: %s", exc)
+            return
+        carried = 0
+        for row in rows:
+            # Only the extended-hours portion is contiguous with pre-market.
+            if str(row["mode"]) not in ("POST", "OVERNIGHT"):
+                continue
+            try:
+                q = json.loads(row["quality_json"] or "{}")
+            except ValueError:
+                continue
+            try:
+                sample_ts = datetime.fromisoformat(
+                    str(row["cycle_ts"]).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            prices = q.get("prices") or {}
+            for sym, vol in (q.get("volumes") or {}).items():
+                if vol is None:
+                    continue
+                dq = self._vol_history.setdefault(sym, deque(maxlen=60))
+                # Rebase: a pre-market counter that restarts below the last
+                # post-market reading would otherwise register as a spike.
+                if dq and float(vol) < dq[-1][1]:
+                    dq.clear()
+                dq.append((as_utc(sample_ts), float(vol), prices.get(sym)))
+                carried += 1
+        if carried:
+            log.info("prior-session carry: seeded %d sample(s) from %s",
+                     carried, prev_day.isoformat())
 
     def _restore_states(self, day: date) -> None:
         # The *latest* decision per symbol wins: a name that went BOARD -> ARMED
@@ -389,6 +470,14 @@ class Runtime:
             if rec.volume is None:
                 continue
             dq = self._vol_history.setdefault(sym, deque(maxlen=60))
+            # Cumulative volume restarts at every session boundary (most feeds
+            # report volume-per-session, not per-day). A counter that drops below
+            # the last sample is a reset, not negative trading: clear the deque
+            # so the delta is measured from the new baseline instead of
+            # underflowing to 0 (which reads as dead tape) or spiking on a bogus
+            # subtraction. This is the rebase half of the POST -> PRE carry-over.
+            if dq and rec.volume < dq[-1][1]:
+                dq.clear()
             dq.append((now, rec.volume, rec.price))
             hist = self._history.setdefault(sym, {})
             vol_3m = self._delta_volume(dq, now, 180.0)
@@ -436,7 +525,7 @@ class Runtime:
     def cycle(self, mode: str, day: date, now: Optional[datetime] = None,
               async_mode: bool = True) -> CycleResult:
         now = as_utc(now or now_utc())
-        self._ensure_day(day)
+        self._ensure_day(day, now)
 
         rows, health = self._fetch_universe(mode)
         # Names worth a fresh quote: the previous board plus any with big moves.

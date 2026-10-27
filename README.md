@@ -308,6 +308,26 @@ Restored `ARMED` names restart their confirmation window (`confirm_bars = 0`);
 the armed *level* is not persisted, so a restart can never ignite a name on a
 price it has not re-confirmed.
 
+### POST → PRE carry-over
+
+The trading-day label rolls at 16:00 ET, which sits in the middle of the
+POST → OVERNIGHT → PRE arc of the *same* name. Without help, `_ensure_day` would
+wipe the rolling volume history at that boundary and pre-market would start
+blind — `vol_3m` needs 3 minutes of samples, `dvol_10m` needs 10 — so a name
+that ran in POST and gapped at 4:00 AM stalled on the volume gate.
+
+`runtime._carry_prior_session` seeds the deque from the last
+`PRIOR_SESSION_CARRY_MIN` (240 = the whole POST window) of the prior session's
+POST/OVERNIGHT snapshots. The window is anchored to the **end of POST**, not to
+"now", because a window measured back from 4:00 AM could never reach a session
+that closed at 20:00 ET the evening before.
+
+Cumulative volume restarts at the boundary, so the counter is **rebased**: a
+sample below the last reading clears the deque instead of producing a huge
+negative delta (which clamps to `0` and reads as dead tape) or a bogus spike.
+With fewer than 10 minutes of fresh pre-market tape, `dvol_10m` is honestly
+absent, which triggers the warmup fallback above rather than failing closed.
+
 Snapshots store only the tracked pool's `quality_json["volumes"]` /
 `["prices"]`, not the whole universe, and are pruned after 2h.
 
@@ -891,6 +911,7 @@ rules-only deployment prints `~ catalyst: no model configured`.
 | `CAND_JSON_TOP_N` | `50` | rank | Keep full gate/feature JSON only for this many top names; other rows store compact reasons. |
 | `MEMORY_TTL_S` | `7200` | s | Evict per-symbol in-memory dictionaries after this long out of the active universe. |
 | `VOL_HISTORY_RESTORE_MIN` | `15` | minutes | On restart, rehydrate the rolling volume history from this recent window. |
+| `PRIOR_SESSION_CARRY_MIN` | `240` | minutes | At the 16:00 ET rollover, seed the rolling volume history from this much of the prior POST/OVERNIGHT tape (anchored to the end of POST). Pre-market starts warm instead of waiting 3-10 minutes for the deque. 0 disables. |
 | `DISK_WARN_PCT` | `10` | % | Warn once when free disk falls under this. |
 | `QUIET_HOURS` | (empty) | HH:MM-HH:MM,mode | Optional per-mode quiet hours (none by default). |
 

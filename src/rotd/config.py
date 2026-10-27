@@ -224,6 +224,10 @@ _GLOBAL: list[Setting] = [
             "Evict per-symbol in-memory dictionaries after this long out of the active universe."),
     Setting("VOL_HISTORY_RESTORE_MIN", "15", "minutes",
             "On restart, rehydrate the rolling volume history from this recent window."),
+    Setting("PRIOR_SESSION_CARRY_MIN", "240", "minutes",
+            "At the 16:00 ET trading-day rollover, seed the rolling volume history from "
+            "this much of the prior POST/OVERNIGHT tape, so pre-market starts warm instead "
+            "of waiting 3-10 minutes for the deque to refill. 0 disables the carry-over."),
     Setting("DISK_WARN_PCT", "10", "%", "Warn once when free disk falls under this."),
     Setting("QUIET_HOURS", "", "HH:MM-HH:MM,mode", "Optional per-mode quiet hours (none by default, §18.5)."),
 
